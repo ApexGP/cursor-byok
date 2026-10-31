@@ -21,7 +21,7 @@ import { PageActions } from "../../shell/PageActions";
 import { appStore, useAppStore } from "../../shared/store/appStore";
 
 export function CursorSettingsPage() {
-  const { models, cursorHarness, cursorBusy, plugins } = useAppStore();
+  const { models, defaultModelId, cursorHarness, cursorBusy, plugins } = useAppStore();
   const navigate = useNavigate();
   const message = useMessage();
   const [draft, setDraft] = useState<CursorModelDraft | null>(null);
@@ -263,6 +263,7 @@ export function CursorSettingsPage() {
     pluginModels={pluginModels}
     grouping={grouping}
     disabled={cursorBusy}
+    defaultModelId={defaultModelId}
     testingModelHashes={testingModelHashes}
     testResults={modelTestResults}
     onTest={(model) => void testModel(model)}
@@ -271,6 +272,7 @@ export function CursorSettingsPage() {
     onDelete={setDeleting}
     onTestPluginModel={(model) => void testModel({ model_hash: model.id, display_name: model.displayName })}
     onPluginSettings={() => navigate("/plugins")}
+    onSetDefault={(modelId) => void appStore.setDefaultModel(modelId)}
     onReorder={reorderModels}
     onGroupSettings={openGroupSettings}
   />;

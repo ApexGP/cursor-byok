@@ -72,7 +72,6 @@ async fn setup() -> (
         runtime,
         plugins.clone(),
         NetworkClients::new(store.clone()),
-        "0.1.0".into(),
     )
     .unwrap();
     let router = byok::router(store.clone(), plugins, shared_provider, None)
@@ -116,6 +115,52 @@ async fn management_settings_enable_the_external_route_without_restart() {
         .await
         .0,
         StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn default_model_endpoint_persists_and_rejects_unknown_ids() {
+    let (router, _provider, store, _directory) = setup().await;
+    let model = store.models().await.unwrap().remove(0);
+
+    let (status, body) = send(
+        router.clone(),
+        "GET",
+        "/__byok-api__/api/models/default",
+        None,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["model_id"], model.model_hash);
+
+    let (status, _) = send(
+        router.clone(),
+        "PUT",
+        "/__byok-api__/api/models/default",
+        None,
+        json!({"model_id": model.model_hash}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        store.default_model_id().await.unwrap().as_deref(),
+        Some(model.model_hash.as_str())
+    );
+
+    let (status, _) = send(
+        router,
+        "PUT",
+        "/__byok-api__/api/models/default",
+        None,
+        json!({"model_id": "missing-model"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        store.default_model_id().await.unwrap().as_deref(),
+        Some(model.model_hash.as_str())
     );
 }
 

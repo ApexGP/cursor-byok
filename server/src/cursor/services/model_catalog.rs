@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use crate::{
     api::cursor::proxy::{self, CursorProxy},
     cursor::{protocol::proto::agent::v1 as agent, transport::TransportRegistry},
-    model::{format_token_count, parse_token_count, ModelConfig},
+    model::{format_token_count, parse_token_count, resolve_default_model_id, ModelConfig},
     plugin::PluginModelDescriptor,
     Error, Result,
 };
@@ -384,21 +384,29 @@ pub async fn cpp_available_models(
         .map(|model| model.model_hash.clone())
         .chain(plugin_models.iter().map(|model| model.id.clone()))
         .collect::<Vec<_>>();
+    let stored_default = registry.store().default_model_id().await?;
+    let explicit_default = stored_default
+        .as_deref()
+        .is_some_and(|id| names.iter().any(|name| name == id));
+    let local_default = resolve_default_model_id(stored_default.as_deref(), &names);
     tracing::info!(
         model_count = models.len(),
         plugin_model_count = plugin_models.len(),
+        default_model = local_default.as_deref(),
         "appending BYOK models to Cursor CppService AvailableModels"
     );
     let local = AvailableCppModelsResponse {
-        default_model: names.first().cloned(),
+        default_model: local_default.clone(),
         models: names,
     };
     match proxy::forward_buffered(&proxy, request).await {
         Ok(upstream) if upstream.status.is_success() => {
             merge_unary(upstream, |merged: &mut AvailableCppModelsResponse| {
                 merged.models.extend(local.models);
-                if merged.default_model.as_deref().is_none_or(str::is_empty) {
-                    merged.default_model = local.default_model;
+                // An explicitly saved default is authoritative; otherwise keep
+                // the upstream default and only fill it when it is missing.
+                if explicit_default || merged.default_model.as_deref().is_none_or(str::is_empty) {
+                    merged.default_model = local_default;
                 }
             })
         }
@@ -474,9 +482,10 @@ pub async fn default_model_for_cli(
 ) -> Result<Response<Body>> {
     let models = registry.store().models().await?;
     let plugin_models = configured_plugin_models(&registry).await;
+    let stored = registry.store().default_model_id().await?;
     Ok(local_response(
         agent::GetDefaultModelForCliResponse {
-            model: default_model_details(&models, &plugin_models),
+            model: default_model_details(&models, &plugin_models, stored.as_deref()),
         }
         .encode_to_vec(),
     ))
@@ -485,8 +494,9 @@ pub async fn default_model_for_cli(
 pub async fn default_model(State(registry): State<TransportRegistry>) -> Result<Response<Body>> {
     let models = registry.store().models().await?;
     let plugin_models = configured_plugin_models(&registry).await;
+    let stored = registry.store().default_model_id().await?;
     Ok(local_response(
-        default_model_response(&models, &plugin_models).encode_to_vec(),
+        default_model_response(&models, &plugin_models, stored.as_deref()).encode_to_vec(),
     ))
 }
 
@@ -510,29 +520,37 @@ async fn configured_plugin_models(registry: &TransportRegistry) -> Vec<PluginMod
 fn default_model_details(
     models: &[ModelConfig],
     plugin_models: &[PluginModelDescriptor],
+    stored_default: Option<&str>,
 ) -> Option<agent::ModelDetails> {
-    models
-        .first()
-        .map(usable_model)
-        .or_else(|| plugin_models.first().map(usable_plugin_model))
+    let model_id = default_model_id(models, plugin_models, stored_default)?;
+    if let Some(model) = models.iter().find(|model| model.model_hash == model_id) {
+        return Some(usable_model(model));
+    }
+    plugin_models
+        .iter()
+        .find(|model| model.id == model_id)
+        .map(usable_plugin_model)
 }
 
-fn default_model_id<'a>(
-    models: &'a [ModelConfig],
-    plugin_models: &'a [PluginModelDescriptor],
-) -> &'a str {
-    models
-        .first()
-        .map(|model| model.model_hash.as_str())
-        .or_else(|| plugin_models.first().map(|model| model.id.as_str()))
-        .unwrap_or_default()
+fn default_model_id(
+    models: &[ModelConfig],
+    plugin_models: &[PluginModelDescriptor],
+    stored_default: Option<&str>,
+) -> Option<String> {
+    let available = models
+        .iter()
+        .map(|model| model.model_hash.clone())
+        .chain(plugin_models.iter().map(|model| model.id.clone()))
+        .collect::<Vec<_>>();
+    resolve_default_model_id(stored_default, &available)
 }
 
 fn default_model_response(
     models: &[ModelConfig],
     plugin_models: &[PluginModelDescriptor],
+    stored_default: Option<&str>,
 ) -> DefaultModelResponse {
-    let model = default_model_id(models, plugin_models).to_owned();
+    let model = default_model_id(models, plugin_models, stored_default).unwrap_or_default();
     DefaultModelResponse {
         thinking_model: model.clone(),
         model,
@@ -1507,19 +1525,31 @@ mod tests {
     }
 
     #[test]
-    fn cli_default_responses_use_the_local_model_hash() {
-        let models = vec![model()];
-        let details = default_model_details(&models, &[]).expect("default model");
+    fn cli_default_responses_prefer_the_persisted_model() {
+        let mut second = model();
+        second.model_hash = "second-model-hash".into();
+        second.display_name = "Second Model".into();
+        let models = vec![model(), second];
+
+        let details = default_model_details(&models, &[], None).expect("default model");
         assert_eq!(details.model_id, "local-model-hash");
 
-        let response = default_model_response(&models, &[]);
-        assert_eq!(response.model, "local-model-hash");
-        assert_eq!(response.thinking_model, "local-model-hash");
+        let details =
+            default_model_details(&models, &[], Some("second-model-hash")).expect("default model");
+        assert_eq!(details.model_id, "second-model-hash");
+        assert_eq!(details.display_name, "Second Model");
+
+        let response = default_model_response(&models, &[], Some("second-model-hash"));
+        assert_eq!(response.model, "second-model-hash");
+        assert_eq!(response.thinking_model, "second-model-hash");
+
+        let stale = default_model_response(&models, &[], Some("deleted-model"));
+        assert_eq!(stale.model, "local-model-hash");
 
         let nudge = default_model_nudge_response(&models, &[]);
         assert_eq!(
             nudge.models_with_no_default_switch,
-            vec!["local-model-hash"]
+            vec!["local-model-hash", "second-model-hash"]
         );
     }
 }

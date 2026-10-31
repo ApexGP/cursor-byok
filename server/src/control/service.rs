@@ -12,18 +12,13 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::ads::{
-    AdDismissalInput, AdRuntime, ADS_ENDPOINT, APP_VERSION_HEADER, DEVICE_ID_HEADER,
-    DISABLED_AD_IDS_HEADER, LANGUAGE_HEADER, OS_HEADER,
-};
-
 use crate::{
     local_app::CursorHarness,
     model::{
-        ContentPart, CursorRunTraceArtifact, CursorRunTraceSummary, LlmCallRequest,
-        LlmCallResponseChunk, LlmCallSummary, ModelConfig, ModelConfigInput, ModelInvocation,
-        ModelRequest, ModelSpec, ModelType, Overview, ProjectedContent, ProjectedMessage,
-        PromptSpec, ProviderType, Role,
+        resolve_default_model_id, ContentPart, CursorRunTraceArtifact, CursorRunTraceSummary,
+        LlmCallRequest, LlmCallResponseChunk, LlmCallSummary, ModelConfig, ModelConfigInput,
+        ModelInvocation, ModelRequest, ModelSpec, ModelType, Overview, ProjectedContent,
+        ProjectedMessage, PromptSpec, ProviderType, Role,
     },
     plugin::{PluginDescriptor, PluginRegistry, PluginRuntime, PluginRuntimeStatus},
     provider::{is_valid_response_event, ModelEvent, Provider},
@@ -42,7 +37,6 @@ pub struct ControlService {
     plugin_runtime: PluginRuntime,
     plugins: PluginRegistry,
     clients: crate::network::NetworkClients,
-    app_version: String,
     model_tests: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
 }
 
@@ -154,7 +148,6 @@ impl ControlService {
         plugin_runtime: PluginRuntime,
         plugins: PluginRegistry,
         clients: crate::network::NetworkClients,
-        app_version: String,
     ) -> Result<Self> {
         let cursor_harness = CursorHarness::new(store.clone())?;
         cursor_harness.set_plugins(plugins.clone());
@@ -165,7 +158,6 @@ impl ControlService {
             plugin_runtime,
             plugins,
             clients,
-            app_version,
             model_tests: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -309,71 +301,38 @@ impl ControlService {
         self.plugin_runtime.cancel_initialization()
     }
 
-    pub(super) async fn ads(
-        &self,
-        disabled_ad_ids: Option<&str>,
-        language: &str,
-    ) -> Result<AdRuntime> {
-        let client = self.clients.default_client().await?;
-        let installation_id = self.store.installation_id().await?;
-        let mut request = client
-            .get(ADS_ENDPOINT)
-            .header(DEVICE_ID_HEADER, installation_id)
-            .header(OS_HEADER, std::env::consts::OS)
-            .header(APP_VERSION_HEADER, &self.app_version)
-            .header(LANGUAGE_HEADER, language)
-            .timeout(std::time::Duration::from_secs(60));
-        if let Some(disabled_ad_ids) = disabled_ad_ids.filter(|value| !value.is_empty()) {
-            request = request.header(DISABLED_AD_IDS_HEADER, disabled_ad_ids);
-        }
-        let response = request.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let message = response.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!(
-                "advertisement service failed ({status}): {}",
-                message.chars().take(200).collect::<String>()
-            )));
-        }
-        let mut runtime = response.json::<AdRuntime>().await?.into_menu_slots()?;
-        runtime.cache_images(&client).await;
-        Ok(runtime)
-    }
-
-    pub(super) async fn dismiss_ad(&self, ad_id: &str, input: &AdDismissalInput) -> Result<()> {
-        let client = self.clients.default_client().await?;
-        let installation_id = self.store.installation_id().await?;
-        let mut endpoint = Url::parse(ADS_ENDPOINT).map_err(|error| {
-            Error::Config(format!("advertisement endpoint is invalid: {error}"))
-        })?;
-        endpoint.set_query(None);
-        endpoint
-            .path_segments_mut()
-            .map_err(|_| Error::Config("advertisement endpoint cannot contain an ad id".into()))?
-            .push(ad_id)
-            .push("dismissals");
-        let response = client
-            .post(endpoint)
-            .header(DEVICE_ID_HEADER, installation_id)
-            .header(OS_HEADER, std::env::consts::OS)
-            .header(APP_VERSION_HEADER, &self.app_version)
-            .json(input)
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let message = response.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!(
-                "advertisement dismissal failed ({status}): {}",
-                message.chars().take(200).collect::<String>()
-            )));
-        }
-        Ok(())
-    }
-
     pub async fn models(&self) -> Result<Vec<ModelConfig>> {
         self.store.models().await
+    }
+
+    /// Returns the effective default model, falling back to the first
+    /// configured model when nothing was saved or the saved model is gone.
+    pub async fn default_model_id(&self) -> Result<Option<String>> {
+        let available = self.available_model_ids().await?;
+        let stored = self.store.default_model_id().await?;
+        Ok(resolve_default_model_id(stored.as_deref(), &available))
+    }
+
+    pub async fn set_default_model_id(&self, model_id: Option<&str>) -> Result<Option<String>> {
+        let available = self.available_model_ids().await?;
+        let requested = model_id.map(str::trim).filter(|value| !value.is_empty());
+        if let Some(model_id) = requested {
+            if !available.iter().any(|candidate| candidate == model_id) {
+                return Err(Error::Config(format!("model {model_id} is not configured")));
+            }
+        }
+        self.store.set_default_model_id(requested).await?;
+        Ok(resolve_default_model_id(requested, &available))
+    }
+
+    async fn available_model_ids(&self) -> Result<Vec<String>> {
+        let models = self.store.models().await?;
+        let plugin_models = self.plugins.configured_models().await;
+        Ok(models
+            .iter()
+            .map(|model| model.model_hash.clone())
+            .chain(plugin_models.iter().map(|model| model.id.clone()))
+            .collect())
     }
 
     pub async fn overview(

@@ -1,12 +1,16 @@
 //! Imports model definitions from the v0.0.49 YAML configuration.
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use serde::Deserialize;
+use sqlx::Row;
 
 use crate::{
     model::{
-        model_hash, normalize_model_input, normalize_request_url, ModelConfigInput, ModelType,
-        OPENAI_CHAT_ENDPOINT, OPENAI_RESPONSES_ENDPOINT,
+        config_hash, new_model_identity, normalize_model_input, normalize_request_url,
+        ModelConfigInput, ModelType, OPENAI_CHAT_ENDPOINT, OPENAI_RESPONSES_ENDPOINT,
     },
     Error, Result,
 };
@@ -82,21 +86,30 @@ struct LegacyModel {
 impl Store {
     pub async fn preview_v0049_model_config(&self, path: &Path) -> Result<LegacyModelImportPlan> {
         let inputs = load_v0049_model_config(path)?;
-        let existing = self
-            .models()
-            .await?
+        let rows = sqlx::query("SELECT model_hash, config_hash FROM model_configs")
+            .fetch_all(&self.pool)
+            .await?;
+        let existing = rows
             .into_iter()
-            .map(|model| model.model_hash)
-            .collect::<HashSet<_>>();
+            .map(|row| {
+                let model_hash: String = row.try_get("model_hash")?;
+                let config_hash: Option<String> = row.try_get("config_hash")?;
+                Ok((
+                    config_hash.unwrap_or_else(|| model_hash.clone()),
+                    model_hash,
+                ))
+            })
+            .collect::<std::result::Result<HashMap<_, _>, sqlx::Error>>()?;
         let mut seen = HashSet::with_capacity(inputs.len());
         let mut models = Vec::with_capacity(inputs.len());
         for input in inputs {
             let input = normalize_model_input(&input)?;
-            let hash = model_hash(&input)?;
+            let hash = config_hash(&input)?;
             if seen.insert(hash.clone()) {
+                let existing_id = existing.get(&hash).cloned();
                 models.push(LegacyModelImportEntry {
-                    existing: existing.contains(&hash),
-                    model_hash: hash,
+                    existing: existing_id.is_some(),
+                    model_hash: existing_id.unwrap_or_else(new_model_identity),
                     input,
                 });
             }

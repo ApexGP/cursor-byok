@@ -1,5 +1,4 @@
 //! Exposes the local control API.
-mod ads;
 mod calls;
 mod harness;
 mod models;
@@ -135,15 +134,6 @@ fn proxy_error(error: impl std::fmt::Display) -> Response<Body> {
 
 pub fn api_router(service: ControlService) -> Router {
     Router::new()
-        .route("/__byok-api__/api/promotions", get(ads::get))
-        .route(
-            "/__byok-api__/api/promotions/images/{file_name}",
-            get(ads::image),
-        )
-        .route(
-            "/__byok-api__/api/promotions/{ad_id}/dismissals",
-            post(ads::dismiss),
-        )
         .route(
             "/__byok-api__/api/models",
             get(models::list).post(models::create),
@@ -154,6 +144,10 @@ pub fn api_router(service: ControlService) -> Router {
             get(models::preview_v0049).post(models::import_v0049),
         )
         .route("/__byok-api__/api/models/order", put(models::reorder))
+        .route(
+            "/__byok-api__/api/models/default",
+            get(models::default_model).put(models::set_default_model),
+        )
         .route("/__byok-api__/api/overview", get(overview::get))
         .route(
             "/__byok-api__/api/models/{model_hash}",
@@ -276,11 +270,7 @@ fn desktop_cors() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _| local_origin(origin)))
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-        .allow_headers([
-            CONTENT_TYPE,
-            header::ACCEPT_LANGUAGE,
-            header::HeaderName::from_static("disable-ad-ids"),
-        ])
+        .allow_headers([CONTENT_TYPE, header::ACCEPT_LANGUAGE])
 }
 
 fn local_origin(origin: &HeaderValue) -> bool {

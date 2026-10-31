@@ -4,11 +4,14 @@ use std::{collections::HashSet, str::FromStr};
 use sqlx::{Row, Sqlite, Transaction};
 
 use crate::{
-    model::{model_hash, normalize_model_input, ModelConfig, ModelConfigInput, ModelType},
+    model::{
+        config_hash, new_model_identity, normalize_model_input, ModelConfig, ModelConfigInput,
+        ModelType,
+    },
     Error, Result,
 };
 
-use super::{now_ms, Store};
+use super::{now_ms, settings::DEFAULT_MODEL_ID_KEY, Store};
 
 const MODEL_COLUMNS: &str = r#"
     model_hash, sort_order, display_name, group_name, model_type, base_url, use_full_url, api_key, tooltip_data,
@@ -54,23 +57,36 @@ impl Store {
         let mut hashes = HashSet::with_capacity(inputs.len());
         for input in inputs {
             let input = normalize_model_input(input)?;
-            let hash = model_hash(&input)?;
+            let hash = config_hash(&input)?;
             if !hashes.insert(hash.clone()) {
                 return Err(Error::Config("model configurations must be unique".into()));
             }
-            normalized.push((hash, input));
+            normalized.push((new_model_identity(), hash, input));
         }
         let now = now_ms();
         let _write = self.writes.lock().await;
         let mut transaction = self.pool.begin().await?;
-        for (hash, input) in &normalized {
-            insert_model(&mut transaction, hash, input, now).await?;
+        for (model_id, hash, input) in &normalized {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM model_configs WHERE config_hash = ?)",
+            )
+            .bind(hash)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if exists {
+                return Err(Error::Config("model configurations must be unique".into()));
+            }
+            insert_model(&mut transaction, model_id, hash, input, now).await?;
         }
         transaction.commit().await?;
 
         let mut saved = Vec::with_capacity(normalized.len());
-        for (hash, _) in normalized {
-            saved.push(self.model(&hash).await?.expect("inserted model must exist"));
+        for (model_id, _, _) in normalized {
+            saved.push(
+                self.model(&model_id)
+                    .await?
+                    .expect("inserted model must exist"),
+            );
         }
         Ok(saved)
     }
@@ -83,18 +99,19 @@ impl Store {
         let mut hashes = HashSet::with_capacity(inputs.len());
         for input in inputs {
             let input = normalize_model_input(input)?;
-            let hash = model_hash(&input)?;
+            let hash = config_hash(&input)?;
             if hashes.insert(hash.clone()) {
-                normalized.push((hash, input));
+                normalized.push((new_model_identity(), hash, input));
             }
         }
         let now = now_ms();
         let _write = self.writes.lock().await;
         let mut transaction = self.pool.begin().await?;
         let mut inserted = 0;
-        for (hash, input) in &normalized {
+        for (model_id, hash, input) in &normalized {
             inserted += usize::from(
-                insert_model_with_conflict(&mut transaction, hash, input, now, true).await?,
+                insert_model_with_conflict(&mut transaction, model_id, hash, input, now, true)
+                    .await?,
             );
         }
         transaction.commit().await?;
@@ -111,19 +128,23 @@ impl Store {
             .await?
             .ok_or_else(|| Error::RunNotFound(format!("model {current_hash}")))?;
         let input = normalize_model_input(input)?;
-        let next_hash = model_hash(&input)?;
+        let next_hash = config_hash(&input)?;
         let now = now_ms();
         let _write = self.writes.lock().await;
         let mut transaction = self.pool.begin().await?;
-        if next_hash != current.model_hash {
-            sqlx::query("UPDATE llm_calls SET model_hash = NULL WHERE model_hash = ?")
-                .bind(&current.model_hash)
-                .execute(&mut *transaction)
-                .await?;
+        let duplicate: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM model_configs WHERE config_hash = ? AND model_hash != ?)",
+        )
+        .bind(&next_hash)
+        .bind(&current.model_hash)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if duplicate {
+            return Err(Error::Config("model configurations must be unique".into()));
         }
         let result = sqlx::query(
             r#"UPDATE model_configs SET
-                model_hash = ?, sort_order = ?, display_name = ?, group_name = ?, model_type = ?, base_url = ?,
+                config_hash = ?, sort_order = ?, display_name = ?, group_name = ?, model_type = ?, base_url = ?,
                 use_full_url = ?, api_key = ?, tooltip_data = ?, model_id = ?, reasoning_effort = ?,
                 openai_endpoint = ?, openai_extra_params_enabled = ?, openai_extra_params_json = ?,
                 custom_headers_enabled = ?, custom_headers_json = ?,
@@ -164,7 +185,7 @@ impl Store {
         }
         transaction.commit().await?;
         Ok(self
-            .model(&next_hash)
+            .model(&current.model_hash)
             .await?
             .expect("updated model must exist"))
     }
@@ -183,6 +204,15 @@ impl Store {
         if result.rows_affected() != 1 {
             return Err(Error::RunNotFound(format!("model {hash}")));
         }
+        sqlx::query(
+            "UPDATE service_settings SET value_json = 'null', updated_at_ms = ?
+             WHERE setting_key = ? AND value_json = ?",
+        )
+        .bind(now_ms())
+        .bind(DEFAULT_MODEL_ID_KEY)
+        .bind(serde_json::to_string(hash)?)
+        .execute(&mut *transaction)
+        .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -226,17 +256,19 @@ impl Store {
 
 async fn insert_model(
     transaction: &mut Transaction<'_, Sqlite>,
-    hash: &str,
+    model_id: &str,
+    config_hash: &str,
     input: &ModelConfigInput,
     now: i64,
 ) -> Result<()> {
-    insert_model_with_conflict(transaction, hash, input, now, false).await?;
+    insert_model_with_conflict(transaction, model_id, config_hash, input, now, false).await?;
     Ok(())
 }
 
 async fn insert_model_with_conflict(
     transaction: &mut Transaction<'_, Sqlite>,
-    hash: &str,
+    model_id: &str,
+    config_hash: &str,
     input: &ModelConfigInput,
     now: i64,
     ignore_existing: bool,
@@ -248,14 +280,14 @@ async fn insert_model_with_conflict(
             openai_extra_params_json, custom_headers_enabled, custom_headers_json,
             anthropic_extra_params_enabled, anthropic_extra_params_json, context_window_tokens,
             max_completion_tokens, anthropic_max_tokens, anthropic_thinking_effort,
-            thinking_budget_tokens, created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+            thinking_budget_tokens, config_hash, created_at_ms, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
     );
     if ignore_existing {
-        statement.push_str(" ON CONFLICT(model_hash) DO NOTHING");
+        statement.push_str(" ON CONFLICT(config_hash) DO NOTHING");
     }
     let result = sqlx::query(&statement)
-        .bind(hash)
+        .bind(model_id)
         .bind(input.sort_order)
         .bind(&input.display_name)
         .bind(&input.group_name)
@@ -278,6 +310,7 @@ async fn insert_model_with_conflict(
         .bind(input.anthropic_max_tokens.map(to_i64).transpose()?)
         .bind(&input.anthropic_thinking_effort)
         .bind(input.thinking_budget_tokens.map(to_i64).transpose()?)
+        .bind(config_hash)
         .bind(now)
         .bind(now)
         .execute(&mut **transaction)
@@ -397,5 +430,63 @@ mod tests {
             .unwrap();
         assert_eq!(cleared.model_hash, created.model_hash);
         assert_eq!(cleared.group_name, None);
+    }
+
+    #[tokio::test]
+    async fn editing_a_model_keeps_its_identity_and_rejects_duplicate_configs() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::connect(&format!(
+            "sqlite://{}",
+            directory.path().join("test.db").display()
+        ))
+        .await
+        .unwrap();
+
+        let first = store.create_model(&model_input(None)).await.unwrap();
+        let mut second_input = model_input(None);
+        second_input.model_id = "second-model".into();
+        let second = store.create_model(&second_input).await.unwrap();
+        assert_ne!(first.model_hash, second.model_hash);
+
+        let mut edited = model_input(None);
+        edited.api_key = "rotated-key".into();
+        edited.display_name = "Renamed".into();
+        let updated = store
+            .update_model(&first.model_hash, &edited)
+            .await
+            .unwrap();
+        assert_eq!(updated.model_hash, first.model_hash);
+        assert_eq!(updated.api_key, "rotated-key");
+        assert_eq!(updated.display_name, "Renamed");
+
+        assert!(store.create_model(&edited).await.is_err());
+        assert!(store
+            .update_model(&second.model_hash, &edited)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn deleting_the_default_model_clears_the_setting() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::connect(&format!(
+            "sqlite://{}",
+            directory.path().join("test.db").display()
+        ))
+        .await
+        .unwrap();
+
+        let model = store.create_model(&model_input(None)).await.unwrap();
+        store
+            .set_default_model_id(Some(&model.model_hash))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.default_model_id().await.unwrap().as_deref(),
+            Some(model.model_hash.as_str())
+        );
+
+        store.delete_model(&model.model_hash).await.unwrap();
+        assert_eq!(store.default_model_id().await.unwrap(), None);
     }
 }

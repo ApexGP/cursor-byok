@@ -1,4 +1,3 @@
-import type { AdRuntime } from "../shell/ads/types";
 import type { CommitPromptLocale, Locale } from "../i18n/runtime";
 
 export type ModelType = "openai" | "anthropic";
@@ -54,6 +53,10 @@ export interface ModelInput {
   anthropic_max_tokens: number | null;
   anthropic_thinking_effort: string | null;
   thinking_budget_tokens: number | null;
+}
+
+export interface DefaultModel {
+  model_id: string | null;
 }
 
 export interface ModelDiscoveryInput {
@@ -476,19 +479,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  ads: (disabledAdIds: Iterable<string>, locale: Locale) => {
-    const value = [...disabledAdIds].join(",");
-    return request<AdRuntime>("/promotions", {
-      headers: {
-        "accept-language": locale,
-        ...(value ? { "disable-ad-ids": value } : {}),
-      },
-    });
-  },
-  dismissAd: (id: string, reason: string) => request<void>(`/promotions/${encodeURIComponent(id)}/dismissals`, { method: "POST", body: JSON.stringify({ reason }) }),
   models: () => request<Model[]>("/models"),
   createModels: (models: ModelInput[]) => request<Model[]>("/models", { method: "POST", body: JSON.stringify({ models }) }),
   reorderModels: (modelHashes: string[]) => request<Model[]>("/models/order", { method: "PUT", body: JSON.stringify({ model_hashes: modelHashes }) }),
+  defaultModel: () => request<DefaultModel>("/models/default"),
+  setDefaultModel: (modelId: string | null) => request<DefaultModel>("/models/default", { method: "PUT", body: JSON.stringify({ model_id: modelId }) }),
   discoverModels: (input: ModelDiscoveryInput) => request<{ models: string[] }>("/models/discover", { method: "POST", body: JSON.stringify(input) }),
   previewV0049Models: () => request<LegacyModelImportPreview>("/models/import-v0049"),
   importV0049Models: () => request<LegacyModelImportResult>("/models/import-v0049", { method: "POST" }),

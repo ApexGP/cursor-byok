@@ -219,6 +219,18 @@
   border-radius: 999px;
   font-size: type.$font-size-2xs;
 }
+.defaultBadge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 7px;
+  color: var(--vscode-badge-foreground, var(--vscode-foreground));
+  background: var(--vscode-badge-background, transparent);
+  border: 1px solid var(--vscode-sideBar-border);
+  border-radius: 999px;
+  font-size: type.$font-size-2xs;
+  white-space: nowrap;
+}
 .modelCardTest {
   min-height: 31px;
   display: flex;

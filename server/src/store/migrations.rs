@@ -454,12 +454,68 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
+            let config_hash_column_exists: i64 = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pragma_table_info('model_configs')
+                    WHERE name = 'config_hash'
+                 )",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
             assert_eq!(checksum_after, checksum_before);
-            assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+            assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
             assert_eq!(checkpoint_table_exists, 1);
             assert_eq!(argument_error_column_exists, 1);
+            assert_eq!(config_hash_column_exists, 1);
         }
+    }
+
+    #[tokio::test]
+    async fn stable_identity_migration_backfills_and_uniques_config_hash() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let historical = migrator_with_line_endings(MigrationLineEndings::Lf);
+        let before_identity_split = Migrator {
+            migrations: Cow::Owned(historical.iter().take(9).cloned().collect()),
+            ..Migrator::DEFAULT
+        };
+        before_identity_split.run(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO model_configs(
+                model_hash, display_name, model_type, base_url, api_key, tooltip_data,
+                model_id, created_at_ms, updated_at_ms
+             ) VALUES ('legacy-id', 'Legacy', 'openai', 'https://example.com/v1/chat/completions',
+                       'key', 'Legacy', 'model', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        run(&pool, Path::new("stable-identity.db")).await.unwrap();
+
+        let config_hash: String = sqlx::query_scalar(
+            "SELECT config_hash FROM model_configs WHERE model_hash = 'legacy-id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(config_hash, "legacy-id");
+
+        let duplicate = sqlx::query(
+            "INSERT INTO model_configs(
+                model_hash, display_name, model_type, base_url, api_key, tooltip_data,
+                model_id, config_hash, created_at_ms, updated_at_ms
+             ) VALUES ('other-id', 'Other', 'openai', 'https://example.com/v1/chat/completions',
+                       'key', 'Other', 'model', 'legacy-id', 0, 0)",
+        )
+        .execute(&pool)
+        .await;
+        assert!(duplicate.is_err());
     }
 
     #[test]

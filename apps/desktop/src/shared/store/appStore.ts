@@ -11,6 +11,7 @@ export const DEFAULT_TOKEN_PRICING: TokenPricingSettings = {
 
 export type AppSnapshot = {
   models: Model[];
+  defaultModelId: string | null;
   calls: LlmCall[];
   overview: Overview;
   detailed: boolean;
@@ -32,6 +33,7 @@ const savedTheme = (): ThemeId => {
 
 let snapshot: AppSnapshot = {
   models: [],
+  defaultModelId: null,
   calls: [],
   overview: {
     metrics: {
@@ -86,8 +88,9 @@ export const appStore = {
   async refresh() {
     update({ busy: true, error: null });
     try {
-      const [models, calls, overview, settings, ports, pricing, cursorHarness, pluginRuntime, plugins] = await Promise.all([
+      const [models, defaultModel, calls, overview, settings, ports, pricing, cursorHarness, pluginRuntime, plugins] = await Promise.all([
         api.models(),
+        api.defaultModel(),
         api.calls(),
         api.overview(),
         api.observability(),
@@ -97,7 +100,7 @@ export const appStore = {
         api.pluginRuntime(),
         api.plugins(),
       ]);
-      update({ models, calls, overview, detailed: settings.detailed, ports, pricing, cursorHarness, pluginRuntime, plugins });
+      update({ models, defaultModelId: defaultModel.model_id, calls, overview, detailed: settings.detailed, ports, pricing, cursorHarness, pluginRuntime, plugins });
     } catch (cause) {
       update({ error: cause instanceof Error ? cause.message : String(cause) });
     } finally {
@@ -110,6 +113,18 @@ export const appStore = {
       await api.deleteModel(modelHash);
       await appStore.refresh();
     });
+  },
+
+  async setDefaultModel(modelId: string | null) {
+    update({ cursorBusy: true, error: null });
+    try {
+      const saved = await api.setDefaultModel(modelId);
+      update({ defaultModelId: saved.model_id });
+    } catch (cause) {
+      update({ error: cause instanceof Error ? cause.message : String(cause) });
+    } finally {
+      update({ cursorBusy: false });
+    }
   },
 
   async initializeCursorCa() {

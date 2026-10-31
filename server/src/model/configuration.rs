@@ -124,6 +124,9 @@ pub struct ModelConfigInput {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ModelConfig {
+    /// Opaque, stable identity of this configured model. It is persisted as
+    /// Cursor's model name, so editing the display name, API key, or endpoint
+    /// must not change it; otherwise Cursor drops the user's saved selection.
     pub model_hash: String,
     pub sort_order: i64,
     pub display_name: String,
@@ -282,7 +285,18 @@ pub fn normalize_model_input(input: &ModelConfigInput) -> Result<ModelConfigInpu
     Ok(normalized)
 }
 
-pub fn model_hash(input: &ModelConfigInput) -> Result<String> {
+/// Generates a stable identity for a newly created model. The value is opaque
+/// to Cursor and is only used as the persisted model name, so it must not be
+/// derived from editable fields.
+pub fn new_model_identity() -> String {
+    let identity = uuid::Uuid::new_v4();
+    hex::encode(&identity.as_bytes()[..8])
+}
+
+/// Content hash used only to reject duplicate model configurations. It is
+/// intentionally independent of `ModelConfig::model_hash`: rows created before
+/// the identity split kept their old content hash in this column.
+pub fn config_hash(input: &ModelConfigInput) -> Result<String> {
     let normalized = normalize_model_input(input)?;
     let request_url = resolve_request_url(
         normalized.model_type,
@@ -301,6 +315,18 @@ pub fn model_hash(input: &ModelConfigInput) -> Result<String> {
     }
     let digest = Sha256::digest(parts.join("\n").as_bytes());
     Ok(hex::encode(&digest[..8]))
+}
+
+/// Chooses the persisted default when it still exists, otherwise falls back to
+/// the first configured model.
+pub fn resolve_default_model_id(stored: Option<&str>, available: &[String]) -> Option<String> {
+    let stored = stored.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(stored) = stored {
+        if available.iter().any(|id| id == stored) {
+            return Some(stored.to_owned());
+        }
+    }
+    available.first().cloned()
 }
 
 pub fn normalize_request_url(value: &str) -> Result<String> {
@@ -475,5 +501,37 @@ impl ModelSpec {
             supports_image_generation: false,
             extra_params: serde_json::json!({}),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{new_model_identity, resolve_default_model_id};
+
+    #[test]
+    fn new_model_identities_are_opaque_and_distinct() {
+        let first = new_model_identity();
+        let second = new_model_identity();
+        assert_eq!(first.len(), 16);
+        assert_eq!(second.len(), 16);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn stored_default_wins_only_while_it_exists() {
+        let available = vec!["first".to_owned(), "second".to_owned()];
+        assert_eq!(
+            resolve_default_model_id(Some("second"), &available).as_deref(),
+            Some("second")
+        );
+        assert_eq!(
+            resolve_default_model_id(Some("deleted"), &available).as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            resolve_default_model_id(Some("   "), &available).as_deref(),
+            Some("first")
+        );
+        assert_eq!(resolve_default_model_id(None, &[]), None);
     }
 }

@@ -8,12 +8,12 @@ use super::{now_ms, Store};
 const PORT_SETTINGS_KEY: &str = "network_ports";
 const PROXY_SETTINGS_KEY: &str = "outbound_proxy";
 const TAB_SETTINGS_KEY: &str = "cursor_tab";
-const INSTALLATION_ID_KEY: &str = "installation_id";
 const DESKTOP_SETTINGS_KEY: &str = "desktop_lifecycle";
 const COMMIT_SETTINGS_KEY: &str = "commit_settings";
 const CURSOR_TAKEOVER_ENABLED_KEY: &str = "cursor_takeover_enabled";
 const PRICING_SETTINGS_KEY: &str = "token_pricing";
 const EXTERNAL_API_SETTINGS_KEY: &str = "external_api";
+pub(crate) const DEFAULT_MODEL_ID_KEY: &str = "default_model";
 
 /// Embedded default system prompts for commit message generation.
 pub const DEFAULT_COMMIT_PROMPT_ZH_CN: &str = include_str!("../../prompt/cursor/commit/zh-CN.md");
@@ -219,6 +219,38 @@ fn read_proxy_settings(value: &str) -> ProxySettingsSecret {
 }
 
 impl Store {
+    /// Returns the explicitly persisted default model ID, if any. Callers must
+    /// still resolve it against the currently configured models: a plugin
+    /// model may have been disabled since the value was written.
+    pub async fn default_model_id(&self) -> Result<Option<String>> {
+        let value = sqlx::query_scalar::<_, String>(
+            "SELECT value_json FROM service_settings WHERE setting_key = ?",
+        )
+        .bind(DEFAULT_MODEL_ID_KEY)
+        .fetch_optional(&self.pool)
+        .await?;
+        value
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .unwrap_or(Ok(None))
+    }
+
+    pub async fn set_default_model_id(&self, model_id: Option<&str>) -> Result<()> {
+        let model_id = model_id.map(str::trim).filter(|value| !value.is_empty());
+        let value_json = serde_json::to_string(&model_id)?;
+        let _write = self.writes.lock().await;
+        sqlx::query(
+            "INSERT INTO service_settings(setting_key, value_json, updated_at_ms) VALUES (?, ?, ?)
+             ON CONFLICT(setting_key) DO UPDATE SET
+             value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(DEFAULT_MODEL_ID_KEY)
+        .bind(value_json)
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn external_api_settings(&self) -> Result<ExternalApiSettings> {
         let value = sqlx::query_scalar::<_, String>(
             "SELECT value_json FROM service_settings WHERE setting_key = ?",
@@ -276,30 +308,6 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
-    }
-
-    pub(crate) async fn installation_id(&self) -> Result<String> {
-        let generated = uuid::Uuid::new_v4().to_string();
-        let _write = self.writes.lock().await;
-        sqlx::query(
-            "INSERT INTO service_settings(setting_key, value_json, updated_at_ms) VALUES (?, ?, ?) ON CONFLICT(setting_key) DO NOTHING",
-        )
-        .bind(INSTALLATION_ID_KEY)
-        .bind(serde_json::to_string(&generated)?)
-        .bind(now_ms())
-        .execute(&self.pool)
-        .await?;
-        let value = sqlx::query_scalar::<_, String>(
-            "SELECT value_json FROM service_settings WHERE setting_key = ?",
-        )
-        .bind(INSTALLATION_ID_KEY)
-        .fetch_one(&self.pool)
-        .await?;
-        let installation_id = serde_json::from_str::<String>(&value)?;
-        uuid::Uuid::parse_str(&installation_id).map_err(|error| {
-            crate::Error::Store(format!("invalid persisted installation ID: {error}"))
-        })?;
-        Ok(installation_id)
     }
 
     pub(crate) async fn proxy_settings_secret(&self) -> Result<ProxySettingsSecret> {
@@ -671,6 +679,33 @@ mod tests {
         assert_eq!(saved, custom);
 
         assert_eq!(store.pricing_settings().await.unwrap(), custom);
+    }
+
+    #[tokio::test]
+    async fn default_model_id_persists_and_can_be_cleared() {
+        let directory = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", directory.path().join("test.db").display());
+        let store = Store::connect(&url).await.unwrap();
+
+        assert_eq!(store.default_model_id().await.unwrap(), None);
+        store.set_default_model_id(Some("model-id")).await.unwrap();
+        assert_eq!(
+            store.default_model_id().await.unwrap().as_deref(),
+            Some("model-id")
+        );
+        store.set_default_model_id(Some("   ")).await.unwrap();
+        assert_eq!(store.default_model_id().await.unwrap(), None);
+        store.set_default_model_id(Some("model-id")).await.unwrap();
+        store.set_default_model_id(None).await.unwrap();
+        assert_eq!(
+            Store::connect(&url)
+                .await
+                .unwrap()
+                .default_model_id()
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

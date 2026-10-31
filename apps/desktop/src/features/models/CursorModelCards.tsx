@@ -23,6 +23,7 @@ type CursorModelCardsProps = {
   pluginModels: PluginModelDescriptor[];
   grouping: CursorModelGrouping;
   disabled: boolean;
+  defaultModelId: string | null;
   testingModelHashes: Set<string>;
   testResults: Map<string, CursorModelTestState>;
   onTest: (model: Model) => void;
@@ -31,6 +32,7 @@ type CursorModelCardsProps = {
   onDelete: (model: Model) => void;
   onTestPluginModel: (model: PluginModelDescriptor) => void;
   onPluginSettings: (model: PluginModelDescriptor) => void;
+  onSetDefault: (modelId: string) => void;
   onReorder: (modelHashes: string[]) => void;
   onGroupSettings: (group: CursorModelGroup) => void;
 };
@@ -68,12 +70,14 @@ export function CursorModelCards(props: CursorModelCardsProps) {
           key={model.model_hash}
           model={model}
           disabled={props.disabled}
+          isDefault={model.model_hash === props.defaultModelId}
           testing={props.testingModelHashes.has(model.model_hash)}
           result={props.testResults.get(model.model_hash)}
           onTest={() => props.onTest(model)}
           onEdit={() => props.onEdit(model)}
           onDuplicate={() => props.onDuplicate(model)}
           onDelete={() => props.onDelete(model)}
+          onSetDefault={() => props.onSetDefault(model.model_hash)}
         />)}
       </CollapsibleGroup>)}
     </div>;
@@ -89,10 +93,12 @@ export function CursorModelCards(props: CursorModelCardsProps) {
         key={model.id}
         model={model}
         disabled={props.disabled}
+        isDefault={model.id === props.defaultModelId}
         testing={props.testingModelHashes.has(model.id)}
         result={props.testResults.get(model.id)}
         onTest={() => props.onTestPluginModel(model)}
         onSettings={() => props.onPluginSettings(model)}
+        onSetDefault={() => props.onSetDefault(model.id)}
       />)}
     </CollapsibleGroup>)}
   </div>;
@@ -150,15 +156,17 @@ function CollapsibleGroup({ label, icon, iconSrc, defaultOpen = true, onSettings
   </Card>;
 }
 
-function ModelListRow({ model, disabled, testing, result, onTest, onEdit, onDuplicate, onDelete }: {
+function ModelListRow({ model, disabled, isDefault, testing, result, onTest, onEdit, onDuplicate, onDelete, onSetDefault }: {
   model: Model;
   disabled: boolean;
+  isDefault: boolean;
   testing: boolean;
   result: CursorModelTestState | undefined;
   onTest: () => void;
   onEdit: () => void;
   onDuplicate: () => void;
   onDelete: () => void;
+  onSetDefault: () => void;
 }) {
   return <div className={styles.modelRow}>
     <div className={styles.modelRowName}>
@@ -167,6 +175,7 @@ function ModelListRow({ model, disabled, testing, result, onTest, onEdit, onDupl
     </div>
     <CursorModelTestResult compact state={result} testing={testing} />
     <div className={styles.modelCardActions}>
+      <DefaultModelControl disabled={disabled} isDefault={isDefault} onSetDefault={onSetDefault} />
       <TruncatedButton size="small" disabled={disabled && !testing} label={testing ? t("取消测试") : t("测试")} onClick={onTest} />
       <TruncatedButton size="small" disabled={disabled} label={t("编辑")} onClick={onEdit} />
       <TruncatedButton size="small" disabled={disabled} label={t("复制")} onClick={onDuplicate} />
@@ -175,13 +184,15 @@ function ModelListRow({ model, disabled, testing, result, onTest, onEdit, onDupl
   </div>;
 }
 
-function PluginModelRow({ model, disabled, testing, result, onTest, onSettings }: {
+function PluginModelRow({ model, disabled, isDefault, testing, result, onTest, onSettings, onSetDefault }: {
   model: PluginModelDescriptor;
   disabled: boolean;
+  isDefault: boolean;
   testing: boolean;
   result: CursorModelTestState | undefined;
   onTest: () => void;
   onSettings: () => void;
+  onSetDefault: () => void;
 }) {
   return <div className={styles.modelRow}>
     <div className={styles.modelRowName}>
@@ -190,22 +201,35 @@ function PluginModelRow({ model, disabled, testing, result, onTest, onSettings }
     </div>
     <CursorModelTestResult compact state={result} testing={testing} />
     <div className={styles.modelCardActions}>
+      <DefaultModelControl disabled={disabled} isDefault={isDefault} onSetDefault={onSetDefault} />
       <TruncatedButton size="small" disabled={disabled && !testing} label={testing ? t("取消测试") : t("测试")} onClick={onTest} />
       <TruncatedButton size="small" disabled={disabled} label={t("设置")} onClick={onSettings} />
     </div>
   </div>;
 }
 
+function DefaultModelControl({ disabled, isDefault, onSetDefault }: {
+  disabled: boolean;
+  isDefault: boolean;
+  onSetDefault: () => void;
+}) {
+  return isDefault
+    ? <span className={styles.defaultBadge}>{t("默认")}</span>
+    : <TruncatedButton size="small" disabled={disabled} label={t("设为默认")} onClick={onSetDefault} />;
+}
+
 function ModelGrid({
   models,
   sortable: sortableEnabled,
   disabled,
+  defaultModelId,
   testingModelHashes,
   testResults,
   onTest,
   onEdit,
   onDuplicate,
   onDelete,
+  onSetDefault,
   onReorder,
 }: ModelGridProps) {
   const grid = useRef<HTMLDivElement>(null);
@@ -262,6 +286,7 @@ function ModelGrid({
     {models.map((model) => {
       const result = testResults.get(model.model_hash);
       const testing = testingModelHashes.has(model.model_hash);
+      const isDefault = model.model_hash === defaultModelId;
       return <Card className={styles.modelCard} data-model-hash={model.model_hash} key={model.model_hash}>
         {sortableEnabled && <button type="button" className={styles.sortHandle} disabled={disabled} aria-label={t("拖动排序")} title={t("拖动排序")} onClick={(event) => event.stopPropagation()}>
           <Icon icon={dragIcon} size="1.25em" />
@@ -281,6 +306,7 @@ function ModelGrid({
             <CursorModelTestResult state={result} testing={testing} />
           </div>
           <div className={styles.modelCardActions}>
+            <DefaultModelControl disabled={disabled} isDefault={isDefault} onSetDefault={() => onSetDefault(model.model_hash)} />
             <TruncatedButton size="small" disabled={disabled && !testing} label={testing ? t("取消测试") : t("测试")} onClick={() => onTest(model)} />
             <TruncatedButton size="small" disabled={disabled} label={t("编辑")} onClick={() => onEdit(model)} />
             <TruncatedButton size="small" disabled={disabled} label={t("复制")} onClick={() => onDuplicate(model)} />

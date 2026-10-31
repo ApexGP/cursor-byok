@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     model::{ModelConfig, ModelConfigInput},
@@ -26,8 +26,36 @@ pub struct ModelOrder {
     pub model_hashes: Vec<String>,
 }
 
+#[derive(Deserialize)]
+pub struct DefaultModelInput {
+    #[serde(default)]
+    pub model_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DefaultModel {
+    pub model_id: Option<String>,
+}
+
 pub async fn list(State(service): State<ControlService>) -> Result<Json<Vec<ModelConfig>>> {
     Ok(Json(service.models().await?))
+}
+
+pub async fn default_model(State(service): State<ControlService>) -> Result<Json<DefaultModel>> {
+    Ok(Json(DefaultModel {
+        model_id: service.default_model_id().await?,
+    }))
+}
+
+pub async fn set_default_model(
+    State(service): State<ControlService>,
+    Json(input): Json<DefaultModelInput>,
+) -> Result<Json<DefaultModel>> {
+    Ok(Json(DefaultModel {
+        model_id: service
+            .set_default_model_id(input.model_id.as_deref())
+            .await?,
+    }))
 }
 
 pub async fn create(

@@ -77,7 +77,6 @@ impl App {
             plugin_runtime,
             plugins,
             clients.clone(),
-            config.app_version.clone(),
         )?;
         // Desktop startup syncs the catalog from `CursorHarness::restore()`
         // after the listener is bound, so it always uses the actual service

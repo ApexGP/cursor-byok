@@ -97,6 +97,7 @@ let proxySettings: ProxySettings = {
 };
 let tabSettings: TabSettings = { mode: "public", address: "" };
 let storage: StatisticsStorage = { call_count: calls.length, trace_count: calls.length };
+let defaultModelId: string | null = models[0]?.model_hash ?? null;
 
 export function installDemoApi() {
   const nativeFetch = window.fetch.bind(window);
@@ -110,10 +111,17 @@ export function installDemoApi() {
     const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
     const body = await readBody(input, init);
 
-    if (path === "/promotions") return json({ slots: [] });
     if (path === "/models" && method === "GET") return json(models);
     if (path === "/models" && method === "POST") return json(models);
     if (path === "/models/order") return json(models);
+    if (path === "/models/default" && method === "GET") return json({ model_id: defaultModelId });
+    if (path === "/models/default") {
+      const requested = (body as { model_id?: string | null } | null)?.model_id ?? null;
+      defaultModelId = requested && models.some((model) => model.model_hash === requested)
+        ? requested
+        : models[0]?.model_hash ?? null;
+      return json({ model_id: defaultModelId });
+    }
     if (path === "/models/discover") return json({ models: models.map((model) => model.model_id) });
     if (path === "/models/import-v0049" && method === "GET") {
       return json({ source: "demo", total: 0, new_models: 0, existing_models: 0, models: [] });

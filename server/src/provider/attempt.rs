@@ -91,7 +91,10 @@ mod tests {
         let address = listener.local_addr().unwrap();
         drop(listener);
         let url = format!("http://{address}");
-        let client = reqwest::Client::new();
+        // A system HTTP proxy would turn the refused connection into an HTTP
+        // error response, so this test must bypass proxies to observe a
+        // transport failure.
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let error = send_once("test", || client.get(&url), &CancellationToken::new(), None)
             .await
             .unwrap_err();
