@@ -40,6 +40,17 @@ impl OutputHub {
         receiver
     }
 
+    /// Prunes dropped receivers before reporting. Used by the disconnect grace
+    /// path so a stale stream's late drop cannot cancel a Run that already has
+    /// a reconnected subscriber.
+    pub fn has_live_subscribers(&self) -> bool {
+        let mut state = self.state.lock();
+        state
+            .subscribers
+            .retain(|subscriber| !subscriber.is_closed());
+        !state.subscribers.is_empty()
+    }
+
     pub fn close(&self) -> bool {
         let mut state = self.state.lock();
         if state.closed {
@@ -49,5 +60,35 @@ impl OutputHub {
         state.subscribers.clear();
         drop(state);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn late_subscriber_replays_history_then_receives_live_frames() {
+        let hub = OutputHub::default();
+        assert!(hub.emit(Bytes::from_static(b"one")));
+        assert!(hub.emit(Bytes::from_static(b"two")));
+
+        let mut receiver = hub.subscribe();
+        assert_eq!(receiver.recv().await, Some(Bytes::from_static(b"one")));
+        assert_eq!(receiver.recv().await, Some(Bytes::from_static(b"two")));
+
+        assert!(hub.emit(Bytes::from_static(b"three")));
+        assert_eq!(receiver.recv().await, Some(Bytes::from_static(b"three")));
+    }
+
+    #[tokio::test]
+    async fn closed_hub_replays_history_but_rejects_new_output() {
+        let hub = OutputHub::default();
+        assert!(hub.emit(Bytes::from_static(b"done")));
+        assert!(hub.close());
+
+        let mut receiver = hub.subscribe();
+        assert_eq!(receiver.recv().await, Some(Bytes::from_static(b"done")));
+        assert!(!hub.emit(Bytes::from_static(b"late")));
     }
 }

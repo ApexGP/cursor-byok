@@ -6,7 +6,14 @@ mod process;
 mod proxy;
 mod settings;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -83,6 +90,7 @@ struct Inner {
     tab_mode: Arc<RwLock<TabMode>>,
     plugins: RwLock<Option<PluginRegistry>>,
     proxy: Mutex<ProxyRuntime>,
+    supervisor_started: AtomicBool,
 }
 
 impl CursorHarness {
@@ -96,6 +104,7 @@ impl CursorHarness {
                 tab_mode: Arc::new(RwLock::new(TabMode::default())),
                 plugins: RwLock::new(None),
                 proxy: Mutex::new(ProxyRuntime::default()),
+                supervisor_started: AtomicBool::new(false),
             }),
         })
     }
@@ -126,6 +135,71 @@ impl CursorHarness {
             .map(|address| format!("http://{address}"))
     }
 
+    /// Starts one background loop that revives a dead local proxy and repairs
+    /// Cursor's `http.proxy` if it drifts while takeover is enabled. The loop
+    /// is a no-op while takeover is disabled.
+    fn ensure_supervisor(&self) {
+        if self.inner.supervisor_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let harness = self.clone();
+        tracing::info!("Cursor proxy supervisor started");
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if let Err(error) = harness.supervise_once().await {
+                    tracing::warn!(%error, "failed to supervise Cursor proxy");
+                }
+            }
+        });
+    }
+
+    async fn supervise_once(&self) -> Result<()> {
+        if !self.inner.store.cursor_takeover_enabled().await? {
+            return Ok(());
+        }
+        if !matches!(self.inner.ca.state()?, CaState::Ready) {
+            return Ok(());
+        }
+        let (running, proxy_url) = {
+            let proxy = self.inner.proxy.lock().await;
+            (proxy.running(), proxy.url())
+        };
+        if !running {
+            if !self.inner.store.cursor_takeover_enabled().await? {
+                return Ok(());
+            }
+            tracing::warn!("local Cursor proxy stopped unexpectedly; restarting it");
+            self.ensure_proxy().await?;
+            return Ok(());
+        }
+        if let Some(proxy_url) = proxy_url {
+            if !settings::settings_match(&proxy_url)? {
+                // Serialize with `disable()` (which stops and clears settings
+                // under the same proxy lock) and re-check the takeover state
+                // under the lock before writing.
+                let proxy = self.inner.proxy.lock().await;
+                if !self.inner.store.cursor_takeover_enabled().await? {
+                    return Ok(());
+                }
+                let Some(live_url) = proxy.url() else {
+                    return Ok(());
+                };
+                if settings::settings_match(&live_url)? {
+                    return Ok(());
+                }
+                tracing::warn!(
+                    proxy_url = live_url,
+                    "Cursor proxy settings drifted; restoring the local proxy"
+                );
+                apply_cursor_configuration(&live_url).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn cleanup_stale_settings(&self) -> Result<()> {
         // When takeover is enabled, keep the managed proxy settings: `restore`
         // rewrites them with the live port on every start. Clearing them first
@@ -152,6 +226,7 @@ impl CursorHarness {
         }
         let previous_proxy_url = settings::proxy_url().unwrap_or(None);
         self.ensure_proxy().await?;
+        self.ensure_supervisor();
         let proxy_url = self.live_proxy_url().await;
         let proxy_changed =
             proxy_url.is_some() && previous_proxy_url.as_deref() != proxy_url.as_deref();
@@ -201,6 +276,7 @@ impl CursorHarness {
             && self.inner.backend_addr.read().is_some()
         {
             self.enable().await?;
+            self.ensure_supervisor();
         }
         let proxy = self.inner.proxy.lock().await;
         let proxy_url = proxy.url();
@@ -239,6 +315,7 @@ impl CursorHarness {
         if enabled {
             self.inner.store.set_cursor_takeover_enabled(true).await?;
             self.enable().await?;
+            self.ensure_supervisor();
             self.sync_model_cache().await?;
             if let Err(error) = self.restart_cursor().await {
                 tracing::warn!(%error, "failed to restart Cursor with the local backend");
@@ -321,6 +398,9 @@ impl CursorHarness {
     }
 
     async fn ensure_proxy(&self) -> Result<()> {
+        if !self.inner.store.cursor_takeover_enabled().await? {
+            return Err(Error::Config("Cursor takeover is not enabled".into()));
+        }
         if !matches!(self.inner.ca.state()?, CaState::Ready) {
             return Err(Error::Config(
                 "initialize and trust the CA before enabling Cursor".into(),
@@ -332,6 +412,12 @@ impl CursorHarness {
             .read()
             .ok_or_else(|| Error::Config("desktop management server is not ready".into()))?;
         let mut proxy = self.inner.proxy.lock().await;
+        // `disable()` flips the takeover flag before taking this lock. Re-check
+        // under the lock so a supervisor tick that raced with disable cannot
+        // start a proxy after takeover was turned off.
+        if !self.inner.store.cursor_takeover_enabled().await? {
+            return Err(Error::Config("Cursor takeover is not enabled".into()));
+        }
         if proxy.running() {
             if let Some(url) = proxy.url() {
                 apply_cursor_configuration(&url).await?;
@@ -361,8 +447,12 @@ impl CursorHarness {
     }
 
     pub async fn disable(&self) -> Result<()> {
+        // Keep the proxy lock while stopping and clearing settings so a
+        // concurrent supervisor tick cannot write the proxy settings after
+        // takeover was disabled.
+        let mut proxy = self.inner.proxy.lock().await;
+        proxy.stop().await;
         settings::clear_proxy_settings()?;
-        self.inner.proxy.lock().await.stop().await;
         Ok(())
     }
 }

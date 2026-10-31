@@ -207,7 +207,17 @@ async fn run_sse_handler(
 ) -> Result<Response<Body>> {
     let (parts, body) = buffered(request).await?;
     let request: agent::BidiRequestId = connect::decode_unary(&body)?;
-    let route = registry.wait_route(&request.request_id).await;
+    let route = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        registry.wait_route(&request.request_id),
+    )
+    .await
+    .map_err(|_| {
+        crate::Error::Protocol(format!(
+            "RunSSE {} timed out waiting for the first BidiAppend",
+            request.request_id
+        ))
+    })?;
     let trace = registry.trace(&request.request_id);
     trace.resume();
     trace.request(

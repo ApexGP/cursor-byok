@@ -1,6 +1,12 @@
 //! Provides the request-scoped input, subscription, and terminal interface.
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, OnceLock,
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -33,6 +39,8 @@ pub struct TransportHandle {
     trace: CursorTraceRecorder,
     lifecycle: TransportLifecycle,
     disconnect: CancellationToken,
+    pending_disconnect: Arc<parking_lot::Mutex<Option<(u64, CancellationToken)>>>,
+    disconnect_generation: Arc<AtomicU64>,
 }
 
 impl TransportHandle {
@@ -51,6 +59,8 @@ impl TransportHandle {
             trace,
             lifecycle: TransportLifecycle::new(),
             disconnect: CancellationToken::new(),
+            pending_disconnect: Arc::new(parking_lot::Mutex::new(None)),
+            disconnect_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -109,8 +119,63 @@ impl TransportHandle {
         let _ = self.commands.send(TransportCommand::Disconnect).await;
     }
 
+    /// Delays a client disconnect until `grace` elapses. A reconnect calls
+    /// `subscribe`, which cancels the pending disconnect; OutputHub replays the
+    /// full output history to the new subscriber.
+    pub fn schedule_disconnect(&self, grace: Duration) {
+        let generation = self
+            .disconnect_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let token = CancellationToken::new();
+        {
+            let mut pending = self.pending_disconnect.lock();
+            if let Some((_, previous)) = pending.take() {
+                previous.cancel();
+            }
+            // A new stream may already be live before the old body's Drop runs.
+            // Never arm a timer while any subscriber is still attached.
+            if self.output.has_live_subscribers() {
+                return;
+            }
+            *pending = Some((generation, token.clone()));
+        }
+        let handle = self.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = token.cancelled() => {}
+                _ = tokio::time::sleep(grace) => {
+                    let should_disconnect = {
+                        let mut pending = handle.pending_disconnect.lock();
+                        if pending
+                            .as_ref()
+                            .is_some_and(|(current, _)| *current == generation)
+                        {
+                            pending.take();
+                            !handle.output.has_live_subscribers()
+                        } else {
+                            false
+                        }
+                    };
+                    if should_disconnect {
+                        handle.disconnect().await;
+                    }
+                }
+            }
+        });
+    }
+
     pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<Bytes> {
-        self.output.subscribe()
+        // Hold the pending-disconnect lock across subscription so the grace
+        // timer cannot fire between cancelling it and registering the new
+        // subscriber.
+        let mut pending = self.pending_disconnect.lock();
+        if let Some((_, token)) = pending.take() {
+            token.cancel();
+        }
+        let receiver = self.output.subscribe();
+        drop(pending);
+        receiver
     }
 
     pub fn emit_frame(&self, frame: Bytes) -> bool {
@@ -177,5 +242,78 @@ impl TransportHandle {
 
     pub(crate) fn mark_disconnected(&self) {
         self.disconnect.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::{
+        cursor::{conversation::TransportCommand, services::observability::CursorTraceService},
+        store::Store,
+    };
+
+    async fn test_handle() -> (
+        TransportHandle,
+        mpsc::Receiver<TransportCommand>,
+        tempfile::TempDir,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", directory.path().join("handle.db").display());
+        let store = Store::connect(&url).await.unwrap();
+        let trace = CursorTraceService::new(store).recorder("request");
+        let (sender, receiver) = mpsc::channel(8);
+        (
+            TransportHandle::new(
+                "request".into(),
+                sender,
+                Arc::new(OutputHub::default()),
+                trace,
+            ),
+            receiver,
+            directory,
+        )
+    }
+
+    #[tokio::test]
+    async fn reconnect_cancels_pending_disconnect() {
+        let (handle, mut commands, _directory) = test_handle().await;
+        handle.schedule_disconnect(Duration::from_millis(30));
+        let _subscriber = handle.subscribe();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), commands.recv())
+                .await
+                .is_err(),
+            "reconnect should cancel the grace disconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_stream_drop_after_reconnect_does_not_disconnect() {
+        let (handle, mut commands, _directory) = test_handle().await;
+        let _subscriber = handle.subscribe();
+        // The replacement stream subscribed first; the old body's Drop runs
+        // later and must not cancel the live Run.
+        handle.schedule_disconnect(Duration::from_millis(20));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), commands.recv())
+                .await
+                .is_err(),
+            "a live subscriber must suppress the stale disconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn grace_expiry_disconnects_without_reconnect() {
+        let (handle, mut commands, _directory) = test_handle().await;
+        handle.schedule_disconnect(Duration::from_millis(20));
+        let command = tokio::time::timeout(Duration::from_millis(200), commands.recv())
+            .await
+            .expect("disconnect should arrive");
+        assert!(matches!(command, Some(TransportCommand::Disconnect)));
     }
 }

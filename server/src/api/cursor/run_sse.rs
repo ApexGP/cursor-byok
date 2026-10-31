@@ -4,7 +4,7 @@ use axum::{
     http::{header, HeaderValue, Response, StatusCode},
 };
 use bytes::Bytes;
-use std::convert::Infallible;
+use std::{convert::Infallible, time::Duration};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
@@ -16,6 +16,8 @@ use crate::{
     },
     Result,
 };
+
+const RUN_DISCONNECT_GRACE: Duration = Duration::from_secs(15);
 
 pub async fn stream(registry: &TransportRegistry, request_id: &str) -> Result<Response<Body>> {
     let handle = registry.get_or_create(request_id).await?;
@@ -41,14 +43,14 @@ pub async fn stream(registry: &TransportRegistry, request_id: &str) -> Result<Re
 }
 
 fn local_body_stream(
-    mut receiver: mpsc::UnboundedReceiver<Bytes>,
+    receiver: mpsc::UnboundedReceiver<Bytes>,
     handle: TransportHandle,
     trace: Option<CursorTraceRecorder>,
 ) -> impl tokio_stream::Stream<Item = std::result::Result<Bytes, Infallible>> {
     async_stream::stream! {
-        let mut guard = LocalRunGuard::new(handle);
+        let mut guard = LocalRunGuard::new(handle, receiver);
         let mut trace = TraceStreamSink::new(trace, "byok_server");
-        while let Some(chunk) = receiver.recv().await {
+        while let Some(chunk) = guard.receiver_mut().recv().await {
             let terminal = is_end_stream_frame(&chunk);
             trace.chunk(&chunk);
             if terminal {
@@ -97,15 +99,39 @@ fn end_stream_error(frame: &Bytes) -> Option<String> {
 
 struct LocalRunGuard {
     handle: TransportHandle,
+    receiver: Option<mpsc::UnboundedReceiver<Bytes>>,
+    grace: Duration,
     completed: bool,
 }
 
 impl LocalRunGuard {
-    fn new(handle: TransportHandle) -> Self {
+    fn new(handle: TransportHandle, receiver: mpsc::UnboundedReceiver<Bytes>) -> Self {
         Self {
             handle,
+            receiver: Some(receiver),
+            grace: RUN_DISCONNECT_GRACE,
             completed: false,
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_grace(
+        handle: TransportHandle,
+        receiver: mpsc::UnboundedReceiver<Bytes>,
+        grace: Duration,
+    ) -> Self {
+        Self {
+            handle,
+            receiver: Some(receiver),
+            grace,
+            completed: false,
+        }
+    }
+
+    fn receiver_mut(&mut self) -> &mut mpsc::UnboundedReceiver<Bytes> {
+        self.receiver
+            .as_mut()
+            .expect("receiver is present until the guard is dropped")
     }
 
     fn complete(&mut self) {
@@ -115,11 +141,12 @@ impl LocalRunGuard {
 
 impl Drop for LocalRunGuard {
     fn drop(&mut self) {
+        // Drop our own subscription before the liveness check. The disconnecting
+        // stream's receiver would otherwise make `has_live_subscribers` return
+        // true forever and suppress the grace timer.
+        drop(self.receiver.take());
         if !self.completed {
-            let handle = self.handle.clone();
-            tokio::spawn(async move {
-                handle.disconnect().await;
-            });
+            self.handle.schedule_disconnect(self.grace);
         }
     }
 }
@@ -228,5 +255,48 @@ impl Drop for UpstreamRunGuard {
     fn drop(&mut self) {
         self.registry
             .finish_upstream(self.request_id.clone(), self.generation);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        cursor::{conversation::TransportCommand, services::observability::CursorTraceService},
+        store::Store,
+    };
+
+    async fn test_handle() -> (
+        TransportHandle,
+        mpsc::Receiver<TransportCommand>,
+        tempfile::TempDir,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", directory.path().join("run_sse.db").display());
+        let store = Store::connect(&url).await.unwrap();
+        let trace = CursorTraceService::new(store).recorder("request");
+        let (sender, receiver) = mpsc::channel(8);
+        (
+            TransportHandle::new(
+                "request".into(),
+                sender,
+                std::sync::Arc::new(crate::cursor::transport::OutputHub::default()),
+                trace,
+            ),
+            receiver,
+            directory,
+        )
+    }
+
+    #[tokio::test]
+    async fn dropping_guard_releases_receiver_before_scheduling_disconnect() {
+        let (handle, mut commands, _directory) = test_handle().await;
+        let receiver = handle.subscribe();
+        let guard = LocalRunGuard::new_with_grace(handle, receiver, Duration::from_millis(20));
+        drop(guard);
+        let command = tokio::time::timeout(Duration::from_millis(200), commands.recv())
+            .await
+            .expect("guard should schedule a grace disconnect");
+        assert!(matches!(command, Some(TransportCommand::Disconnect)));
     }
 }
