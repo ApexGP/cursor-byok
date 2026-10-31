@@ -54,6 +54,12 @@ impl WebCache {
         }
     }
 
+    pub fn service_addr(&self) -> Option<SocketAddr> {
+        self.inner
+            .as_ref()
+            .and_then(|inner| *inner.service_addr.read())
+    }
+
     pub async fn store(&self, content: &str) -> Result<Option<WebCacheEntry>> {
         let Some(inner) = &self.inner else {
             return Ok(None);

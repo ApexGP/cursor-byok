@@ -17,7 +17,7 @@ pub async fn inject_if_missing() -> Result<()> {
     inject_if_missing_at(&state_db_path()?).await
 }
 
-fn state_db_path() -> Result<PathBuf> {
+pub(crate) fn state_db_path() -> Result<PathBuf> {
     let home = dirs::home_dir()
         .ok_or_else(|| Error::Config("cannot resolve user home directory".into()))?;
     match std::env::consts::OS {

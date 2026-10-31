@@ -24,6 +24,7 @@ pub async fn remove(
     Path(plugin_id): Path<String>,
 ) -> Result<StatusCode> {
     service.remove_plugin_configuration(&plugin_id).await?;
+    service.sync_cursor_model_cache_best_effort().await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -42,7 +43,9 @@ pub async fn oauth_poll(
     State(service): State<ControlService>,
     Path(session_id): Path<String>,
 ) -> Result<Json<OAuthPollResponse>> {
-    Ok(Json(service.plugin_oauth_poll(&session_id).await?))
+    let result = service.plugin_oauth_poll(&session_id).await?;
+    service.sync_cursor_model_cache_best_effort().await;
+    Ok(Json(result))
 }
 
 pub async fn import(
@@ -50,11 +53,11 @@ pub async fn import(
     Path((plugin_id, resource_type)): Path<(String, String)>,
     Json(files): Json<serde_json::Value>,
 ) -> Result<Json<ImportResponse>> {
-    Ok(Json(
-        service
-            .plugin_import(&plugin_id, &resource_type, files)
-            .await?,
-    ))
+    let result = service
+        .plugin_import(&plugin_id, &resource_type, files)
+        .await?;
+    service.sync_cursor_model_cache_best_effort().await;
+    Ok(Json(result))
 }
 
 /// 以附件形式返回账号资源导出文件,便于浏览器直接下载。
@@ -119,6 +122,7 @@ pub async fn sync_models(
     Path((plugin_id, provider_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>> {
     let count = service.plugin_sync_models(&plugin_id, &provider_id).await?;
+    service.sync_cursor_model_cache_best_effort().await;
     Ok(Json(serde_json::json!({ "models": count })))
 }
 
@@ -138,6 +142,7 @@ pub async fn set_model_enabled(
     service
         .plugin_set_model_enabled(&plugin_id, &provider_id, model_id, enabled)
         .await?;
+    service.sync_cursor_model_cache_best_effort().await;
     Ok(StatusCode::NO_CONTENT)
 }
 

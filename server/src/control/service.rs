@@ -156,8 +156,10 @@ impl ControlService {
         clients: crate::network::NetworkClients,
         app_version: String,
     ) -> Result<Self> {
+        let cursor_harness = CursorHarness::new(store.clone())?;
+        cursor_harness.set_plugins(plugins.clone());
         Ok(Self {
-            cursor_harness: CursorHarness::new(store.clone())?,
+            cursor_harness,
             store,
             provider,
             plugin_runtime,
@@ -170,6 +172,31 @@ impl ControlService {
 
     pub fn cursor_harness(&self) -> &CursorHarness {
         &self.cursor_harness
+    }
+
+    /// Mirrors the configured built-in and plugin models into Cursor's persisted
+    /// catalog so the picker keeps them after the agent-host module refreshes
+    /// its official-only catalog.
+    pub(crate) async fn sync_cursor_model_cache(
+        &self,
+    ) -> Result<crate::local_app::model_cache::CursorCatalogSync> {
+        if !self.store.cursor_takeover_enabled().await? {
+            return Ok(Default::default());
+        }
+        let port = self.store.port_settings().await?.service_port;
+        let service_url = (port != 0).then(|| format!("http://127.0.0.1:{port}"));
+        crate::local_app::model_cache::sync_with(
+            &self.store,
+            Some(&self.plugins),
+            service_url.as_deref(),
+        )
+        .await
+    }
+
+    pub(crate) async fn sync_cursor_model_cache_best_effort(&self) {
+        if let Err(error) = self.sync_cursor_model_cache().await {
+            tracing::warn!(%error, "failed to sync Cursor model cache");
+        }
     }
 
     pub async fn plugins(&self) -> Vec<PluginDescriptor> {
@@ -362,15 +389,21 @@ impl ControlService {
     }
 
     pub async fn create_models(&self, models: &[ModelConfigInput]) -> Result<Vec<ModelConfig>> {
-        self.store.create_models(models).await
+        let saved = self.store.create_models(models).await?;
+        self.sync_cursor_model_cache_best_effort().await;
+        Ok(saved)
     }
 
     pub async fn reorder_models(&self, model_hashes: &[String]) -> Result<Vec<ModelConfig>> {
-        self.store.reorder_models(model_hashes).await
+        let saved = self.store.reorder_models(model_hashes).await?;
+        self.sync_cursor_model_cache_best_effort().await;
+        Ok(saved)
     }
 
     pub async fn delete_model(&self, model_hash: &str) -> Result<()> {
-        self.store.delete_model(model_hash).await
+        self.store.delete_model(model_hash).await?;
+        self.sync_cursor_model_cache_best_effort().await;
+        Ok(())
     }
 
     pub async fn update_model(
@@ -378,7 +411,9 @@ impl ControlService {
         model_hash: &str,
         input: &ModelConfigInput,
     ) -> Result<ModelConfig> {
-        self.store.update_model(model_hash, input).await
+        let saved = self.store.update_model(model_hash, input).await?;
+        self.sync_cursor_model_cache_best_effort().await;
+        Ok(saved)
     }
 
     pub async fn test_model(
@@ -568,6 +603,7 @@ impl ControlService {
     pub async fn import_v0049_models(&self) -> Result<LegacyModelImportResult> {
         let path = crate::config::v0049_config_path()?;
         let outcome = self.store.import_v0049_model_config(&path).await?;
+        self.sync_cursor_model_cache_best_effort().await;
         Ok(LegacyModelImportResult {
             imported: outcome.imported,
             skipped: outcome.skipped,

@@ -5,6 +5,7 @@ import {
   hasNativeAppLifecycle,
   readAutostart,
   readDesktopSettings,
+  restartApp,
   writeAutostart,
   writeDockIconVisibility,
   writeSilentStart,
@@ -27,6 +28,7 @@ export function AppLifecycleSettingsCard() {
   const [silentStart, setSilentStart] = useState(false);
   const [dockIconVisible, setDockIconVisible] = useState(true);
   const [loadingDesktopSettings, setLoadingDesktopSettings] = useState(native);
+  const [restarting, setRestarting] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -90,6 +92,16 @@ export function AppLifecycleSettingsCard() {
     }
   };
 
+  const restart = async () => {
+    try {
+      setRestarting(true);
+      await restartApp();
+    } catch (cause) {
+      message(cause instanceof Error ? cause.message : String(cause));
+      setRestarting(false);
+    }
+  };
+
   const checkUpdate = async () => {
     try {
       const nextVersion = await updateStore.check();
@@ -146,6 +158,15 @@ export function AppLifecycleSettingsCard() {
         onChange={(visible) => void toggleDockIcon(visible)}
       />
     </div>}
+    <div className={styles.row}>
+      <div>
+        <strong>{t("重启应用")}</strong>
+        <small>{t("修改端口或配置后重启生效。")}</small>
+      </div>
+      <Button size="small" disabled={!native || restarting} onClick={() => void restart()}>
+        {t("重启应用")}
+      </Button>
+    </div>
     <div className={styles.row}>
       <div>
         <strong>{t("软件更新")}</strong>

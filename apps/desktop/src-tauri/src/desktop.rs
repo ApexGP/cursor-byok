@@ -234,7 +234,14 @@ pub fn run() -> ExitCode {
             let server = server.merge_router(frontend::router(app.handle().clone()));
             let listener = tauri::async_runtime::block_on(server.bind())?;
             let address = listener.local_addr()?;
-            tauri::async_runtime::block_on(server.harness().cleanup_stale_settings())?;
+            let harness = server.harness();
+            harness.set_backend_addr(address);
+            if let Err(error) = tauri::async_runtime::block_on(harness.cleanup_stale_settings()) {
+                tracing::warn!(%error, "failed to clean stale Cursor proxy settings");
+            }
+            if let Err(error) = tauri::async_runtime::block_on(harness.restore()) {
+                tracing::warn!(%error, "failed to restore Cursor takeover at startup");
+            }
             let desktop_settings =
                 tauri::async_runtime::block_on(server.store().desktop_settings())
                     .unwrap_or_default();

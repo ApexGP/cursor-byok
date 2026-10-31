@@ -26,3 +26,16 @@ pub async fn set_enabled(
         service.cursor_harness().set_enabled(input.enabled).await?,
     ))
 }
+
+pub async fn sync_model_cache(
+    State(service): State<ControlService>,
+) -> Result<Json<crate::local_app::model_cache::CursorCatalogSync>> {
+    Ok(Json(service.sync_cursor_model_cache().await?))
+}
+
+pub async fn restart_cursor(
+    State(service): State<ControlService>,
+) -> Result<Json<CursorHarnessStatus>> {
+    service.cursor_harness().restart_cursor().await?;
+    Ok(Json(service.cursor_harness().status().await?))
+}

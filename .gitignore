@@ -1,35 +1,48 @@
-claude-server.tar
+# OS / local editor state
 .DS_Store
-dist
-.task
-/local-docs/
-/bin/
-logs/
-cursor-server.db
-cursor-server.db-shm
-cursor-server.db-wal
-gen/
-logs.zip
-frontend/bindings
-dist
-node_modules
+/.vscode/
+/.idea/
 *.tsbuildinfo
-cursor-server.tar
+
+# Rust / Node build output
 /target/
 /server/target/
+/bin/
+gen/
 /apps/desktop/src-tauri/gen/
 /.tauri/
+dist/
+node_modules/
+frontend/bindings
+
+# Local runtime data and logs
+.task
+/local-docs/
+logs/
+logs.zip
 /server/*.db
 /server/*.db-shm
 /server/*.db-wal
-server-node/cursor.tar
-server-go/cursor.tar
-server-go/log/
+cursor-server.db
+cursor-server.db-shm
+cursor-server.db-wal
 .cursor-local-assistant
 .cursor-local-assistant-v2
 .cursor-app-formatted/
+
+# Downloaded / generated archives
+claude-server.tar
+cursor-server.tar
+server-node/cursor.tar
+server-go/cursor.tar
+server-go/log/
 proto/extensions-cursor-app/
 cursor-tab-server/cursor-tab-server-linux-amd64.tar
+
+# Local debugging artifacts
+/snapshot_*.png
+
+# Generated protocol sources, keep the two checked-in contracts
 /scripts/cursor-proto/proto/*
 !/scripts/cursor-proto/proto/agent_v1.proto
 !/scripts/cursor-proto/proto/aiserver_v1.proto

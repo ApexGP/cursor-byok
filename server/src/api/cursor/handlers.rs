@@ -85,6 +85,18 @@ fn router_with_proxy(
             post(model_catalog::usable_models),
         )
         .route(
+            "/aiserver.v1.CppService/AvailableModels",
+            post(model_catalog::cpp_available_models),
+        )
+        .route(
+            "/aiserver.v1.AiService/GetModelLabels",
+            post(model_catalog::model_labels),
+        )
+        .route(
+            "/aiserver.v1.AiService/GetLastDefaultModelNudge",
+            post(model_catalog::last_default_model_nudge),
+        )
+        .route(
             "/aiserver.v1.AiService/WriteGitCommitMessage",
             post(commit_message::write_git_commit_message),
         )

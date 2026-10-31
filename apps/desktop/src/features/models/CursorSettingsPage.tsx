@@ -315,6 +315,9 @@ export function CursorSettingsPage() {
             }}
           />
         </TooltipTrigger>
+        {cursorTakenOver && <div className={styles.groupActions} role="group" aria-label={t("操作")}>
+          <button type="button" disabled={cursorBusy} onClick={() => void appStore.restartCursor()}>{t("重启 Cursor")}</button>
+        </div>}
         {testTargets.length > 0 && <div className={styles.groupActions} role="group" aria-label={t("操作")}>
           <button type="button" aria-pressed={grouping === "flat"} onClick={() => setGrouping("flat")}>{t("默认平铺")}</button>
           {canGroupByProvider && <button type="button" aria-pressed={grouping === "provider"} onClick={() => setGrouping("provider")}>{t("按供应商")}</button>}

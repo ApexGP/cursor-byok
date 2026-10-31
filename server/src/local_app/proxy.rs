@@ -1,5 +1,9 @@
 //! Configures the local application proxy.
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashSet,
+    net::SocketAddr,
+    sync::{Arc, Mutex as StdMutex, OnceLock},
+};
 
 use hudsucker::{
     certificate_authority::RcgenAuthority,
@@ -113,8 +117,16 @@ impl HttpHandler for CursorRelay {
         mut request: Request<Body>,
     ) -> RequestOrResponse {
         let original = request.uri().clone();
+        // CONNECT uses authority-form URIs; rewriting them would hide the Cursor
+        // host from `should_intercept_connect` and break TLS interception.
+        if request.method() == hudsucker::hyper::Method::CONNECT {
+            return request.into();
+        }
         let locally_routed = should_route_locally(original.path(), *self.tab_mode.read());
         if is_cursor_host(original.host().unwrap_or_default()) && locally_routed {
+            if !is_local_path(original.path()) {
+                log_unhandled_path_once(original.path());
+            }
             if let Ok(value) = original.to_string().parse() {
                 request.headers_mut().insert(UPSTREAM_URL_HEADER, value);
             }
@@ -154,6 +166,21 @@ pub fn is_cursor_host(host: &str) -> bool {
     matches!(host.as_str(), "api2.cursor.sh" | "api3.cursor.sh") || host.ends_with(".cursor.sh")
 }
 
+/// Logs each unhandled Cursor path once so a Cursor update that adds a new
+/// model RPC is visible in normal INFO logs without flooding them.
+fn log_unhandled_path_once(path: &str) {
+    static SEEN: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| StdMutex::new(HashSet::new()));
+    if let Ok(mut seen) = seen.lock() {
+        if seen.insert(path.to_string()) {
+            tracing::info!(
+                path,
+                "Cursor path is not locally handled; forwarding through the configured outbound proxy"
+            );
+        }
+    }
+}
+
 fn is_local_path(path: &str) -> bool {
     matches!(
         path,
@@ -172,6 +199,9 @@ fn is_local_path(path: &str) -> bool {
             | "/aiserver.v1.AiService/GetDefaultModelForCli"
             | "/aiserver.v1.AiService/GetDefaultModel"
             | "/aiserver.v1.AiService/GetDefaultModelNudgeData"
+            | "/aiserver.v1.AiService/GetLastDefaultModelNudge"
+            | "/aiserver.v1.AiService/GetModelLabels"
+            | "/aiserver.v1.CppService/AvailableModels"
             | "/aiserver.v1.AuthService/GetEmail"
             | "/aiserver.v1.AuthService/GetUserMeta"
             | "/aiserver.v1.DashboardService/GetMe"
@@ -192,7 +222,25 @@ fn is_local_path(path: &str) -> bool {
 }
 
 fn should_route_locally(path: &str, tab_mode: TabMode) -> bool {
-    is_local_path(path) || (is_tab_path(path) && tab_mode != TabMode::Direct)
+    // Model catalog RPCs always stay local so Cursor can see BYOK models even
+    // when Tab is configured for direct mode.
+    is_model_catalog_path(path) || !(is_tab_path(path) && tab_mode == TabMode::Direct)
+}
+
+fn is_model_catalog_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/aiserver.v1.AiService/AvailableModels"
+            | "/aiserver.v1.CppService/AvailableModels"
+            | "/agent.v1.AgentService/GetUsableModels"
+            | "/aiserver.v1.AiService/GetUsableModels"
+            | "/agent.v1.AgentService/GetDefaultModelForCli"
+            | "/aiserver.v1.AiService/GetDefaultModelForCli"
+            | "/aiserver.v1.AiService/GetDefaultModel"
+            | "/aiserver.v1.AiService/GetDefaultModelNudgeData"
+            | "/aiserver.v1.AiService/GetLastDefaultModelNudge"
+            | "/aiserver.v1.AiService/GetModelLabels"
+    )
 }
 
 #[cfg(test)]
@@ -208,6 +256,9 @@ mod tests {
             "/aiserver.v1.AiService/GetDefaultModelForCli",
             "/aiserver.v1.AiService/GetDefaultModel",
             "/aiserver.v1.AiService/GetDefaultModelNudgeData",
+            "/aiserver.v1.AiService/GetLastDefaultModelNudge",
+            "/aiserver.v1.AiService/GetModelLabels",
+            "/aiserver.v1.CppService/AvailableModels",
             "/aiserver.v1.AiService/AvailableDocs",
             "/aiserver.v1.DashboardService/GetEffectiveUserPlugins",
             "/aiserver.v1.DashboardService/GetUserPrivacyMode",
@@ -218,5 +269,37 @@ mod tests {
         ] {
             assert!(is_local_path(path), "{path} must not reach Cursor upstream");
         }
+    }
+
+    #[test]
+    fn model_catalog_paths_ignore_tab_direct_mode() {
+        for path in [
+            "/aiserver.v1.AiService/AvailableModels",
+            "/aiserver.v1.CppService/AvailableModels",
+            "/agent.v1.AgentService/GetUsableModels",
+            "/aiserver.v1.AiService/GetDefaultModel",
+            "/aiserver.v1.AiService/GetModelLabels",
+        ] {
+            assert!(
+                should_route_locally(path, TabMode::Direct),
+                "{path} must stay local in Tab Direct mode"
+            );
+        }
+    }
+
+    #[test]
+    fn non_tab_paths_use_the_local_backend_in_direct_mode() {
+        assert!(should_route_locally(
+            "/aiserver.v1.AiService/UnhandledPath",
+            TabMode::Direct
+        ));
+        assert!(!should_route_locally(
+            "/aiserver.v1.AiService/StreamCpp",
+            TabMode::Direct
+        ));
+        assert!(should_route_locally(
+            "/aiserver.v1.AiService/StreamCpp",
+            TabMode::Public
+        ));
     }
 }

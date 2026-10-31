@@ -79,6 +79,9 @@ impl App {
             clients.clone(),
             config.app_version.clone(),
         )?;
+        // Desktop startup syncs the catalog from `CursorHarness::restore()`
+        // after the listener is bound, so it always uses the actual service
+        // port. Skipping the pre-bind sync avoids writing a stale URL twice.
         let harness = control.cursor_harness().clone();
         let mut router = api::router(registry.clone(), clients)?.merge(byok);
         router = match &config.console {

@@ -41,6 +41,13 @@ fn main() {
         "ERROR_PROVIDER_ERROR = 57;",
         "CustomErrorDetails details = 2;",
         "optional bool is_expected = 3;",
+        "message AvailableCppModelsResponse",
+        "optional bool is_user_added = 23;",
+        "optional bool is_hidden = 35;",
+        "repeated string id_aliases = 37;",
+        "optional bool visible_in_routed_model_view = 40;",
+        "optional int32 context_token_limit = 15;",
+        "optional int32 context_token_limit_for_max_mode = 16;",
     ] {
         assert!(
             aiserver_source.contains(required),

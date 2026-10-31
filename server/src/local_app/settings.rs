@@ -59,6 +59,13 @@ fn write(settings: &BTreeMap<String, Value>) -> Result<()> {
     Ok(())
 }
 
+pub fn proxy_url() -> Result<Option<String>> {
+    Ok(read()?
+        .get(KEYS[0])
+        .and_then(Value::as_str)
+        .map(str::to_owned))
+}
+
 pub fn write_proxy_settings(proxy_url: &str) -> Result<()> {
     let mut settings = read()?;
     settings.remove(NO_PROXY_KEY);

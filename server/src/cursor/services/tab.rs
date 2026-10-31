@@ -9,7 +9,7 @@ use axum::{
 
 use crate::{api::cursor::proxy, cursor::transport::TransportRegistry, Result};
 
-pub const TAB_PATHS: [&str; 16] = [
+pub const TAB_PATHS: [&str; 15] = [
     "/aiserver.v1.AiService/StreamCpp",
     "/aiserver.v1.AiService/StreamNextCursorPrediction",
     "/aiserver.v1.AiService/GetCppEditClassification",
@@ -20,7 +20,6 @@ pub const TAB_PATHS: [&str; 16] = [
     "/aiserver.v1.AiService/CppEditHistoryAppend",
     "/aiserver.v1.AiService/ReportAiCodeChangeMetrics",
     "/aiserver.v1.AiService/WriteGitBranchName",
-    "/aiserver.v1.CppService/AvailableModels",
     "/aiserver.v1.CppService/RecordCppFate",
     "/aiserver.v1.FileSyncService/FSSyncFile",
     "/aiserver.v1.FileSyncService/FSIsEnabledForUser",

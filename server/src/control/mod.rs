@@ -41,7 +41,13 @@ pub fn proxy_web_router(service: ControlService, target: Url) -> Router {
 
 fn frontend_proxy_router(target: Url) -> Router {
     let state = FrontendProxy {
-        client: reqwest::Client::new(),
+        // Loopback must never go through the OS proxy: a system proxy that
+        // rejects the connection would hide Vite startup failures behind a
+        // 503 and bypass the retry below.
+        client: reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build frontend proxy client"),
         target: target.as_str().trim_end_matches('/').to_string(),
     };
     Router::new()
@@ -66,21 +72,39 @@ async fn proxy_frontend(
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or("/__byok-api__/");
-    let mut upstream = proxy
-        .client
-        .request(parts.method, format!("{}{path}", proxy.target));
-    for (name, value) in &parts.headers {
-        if name != header::HOST && name != header::CONNECTION {
-            upstream = upstream.header(name, value);
-        }
-    }
     let body = match to_bytes(body, 64 * 1024 * 1024).await {
         Ok(body) => body,
         Err(error) => return proxy_error(error),
     };
-    let upstream = match upstream.body(body).send().await {
-        Ok(response) => response,
-        Err(error) => return proxy_error(error),
+    // Vite may be starting while the webview requests its first modules. Retry
+    // briefly so a dev launch does not render a black window.
+    let mut last_error = None;
+    let mut upstream = None;
+    for attempt in 0..5 {
+        let mut request = proxy
+            .client
+            .request(parts.method.clone(), format!("{}{path}", proxy.target));
+        for (name, value) in &parts.headers {
+            if name != header::HOST && name != header::CONNECTION {
+                request = request.header(name, value);
+            }
+        }
+        match request.body(body.clone()).send().await {
+            Ok(response) => {
+                upstream = Some(response);
+                break;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 4 {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+    }
+    let upstream = match upstream {
+        Some(response) => response,
+        None => return proxy_error(last_error.expect("at least one proxy attempt")),
     };
     let status = upstream.status();
     let headers = upstream.headers().clone();
@@ -235,6 +259,14 @@ pub fn api_router(service: ControlService) -> Router {
         .route(
             "/__byok-api__/api/harness/cursor/enabled",
             put(harness::set_enabled),
+        )
+        .route(
+            "/__byok-api__/api/harness/cursor/model-cache/sync",
+            post(harness::sync_model_cache),
+        )
+        .route(
+            "/__byok-api__/api/harness/cursor/restart",
+            post(harness::restart_cursor),
         )
         .with_state(service)
         .layer(desktop_cors())

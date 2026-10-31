@@ -18,6 +18,11 @@ export async function currentAppVersion(): Promise<string> {
   return hasNativeAppLifecycle() ? getVersion() : "dev";
 }
 
+export async function restartApp(): Promise<void> {
+  if (!hasNativeAppLifecycle()) throw new Error("restart is only available in the desktop app");
+  await relaunch();
+}
+
 export async function readAutostart(): Promise<boolean> {
   return isEnabled();
 }

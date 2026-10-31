@@ -130,6 +130,7 @@ export function installDemoApi() {
     if (path.startsWith("/llm-calls/")) return json(createCallDetail(path.slice("/llm-calls/".length)));
     if (path === "/harness/cursor/status") return json(harnessStatus);
     if (path === "/harness/cursor/ca/initialize") return json(harnessStatus);
+    if (path === "/harness/cursor/restart") return json(harnessStatus);
     if (path === "/harness/cursor/enabled") {
       const enabled = Boolean((body as { enabled?: unknown } | null)?.enabled);
       harnessStatus = {
