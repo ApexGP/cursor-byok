@@ -6,12 +6,14 @@
 
 cursor-byok is an open-source local model gateway for Cursor. It connects Cursor to the OpenAI- and Anthropic-compatible services you configure, while keeping tool calling, Skills, MCP, and multi-turn Agent workflows available.
 
-[简体中文](./README-CN.md) · [User Guide](https://docs.leokun.cn) · [Download](https://github.com/ApexGP/cursor-byok/releases/latest) · [Report an Issue](https://github.com/leookun/cursor-byok/issues)
+This repository is independently maintained at `ApexGP/cursor-byok` (no longer part of a GitHub fork network). Releases and automatic updates are published from this repository.
+
+[简体中文](./README-CN.md) · [User Guide](https://docs.leokun.cn) · [Download](https://github.com/ApexGP/cursor-byok/releases/latest) · [Report an Issue](https://github.com/ApexGP/cursor-byok/issues)
 
 [![Release](https://img.shields.io/github/v/release/ApexGP/cursor-byok?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/leookun/cursor-byok/total?style=flat-square)](https://github.com/leookun/cursor-byok/releases)
-[![License](https://img.shields.io/github/license/leookun/cursor-byok?style=flat-square)](./LICENSE)
-[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square)](https://github.com/leookun/cursor-byok/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/ApexGP/cursor-byok/total?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases)
+[![License](https://img.shields.io/github/license/ApexGP/cursor-byok?style=flat-square)](./LICENSE)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases/latest)
 
 </div>
 
@@ -42,7 +44,7 @@ Cursor is powerful, but its model choices are tied to the platform. cursor-byok 
 
 ## Quick Start
 
-1. Download the latest build for your platform from [GitHub Releases](https://github.com/leookun/cursor-byok/releases/latest).
+1. Download the latest build for your platform from [GitHub Releases](https://github.com/ApexGP/cursor-byok/releases/latest).
 2. Launch cursor-byok and open **Cursor Configuration**. Initialize and trust the local CA when prompted.
 3. Add a model in **Model Settings**: enter the service address, API key, and model name, then save and run **Test**.
 4. Keep cursor-byok running after the test passes.
@@ -87,7 +89,7 @@ Cursor's Tab completion is handled by a separate TAB service and does not go thr
 
 - **Public service (default):** Use the public service deployed by the project author. No extra configuration is required.
 - **Direct:** Connect directly to the official TAB service for the current Cursor account. Suitable when your account has official quota.
-- **Custom:** Deploy [`cursor-tab-server`](https://github.com/leookun/cursor-byok/tree/archive/v0.0.49/cursor-tab-server) yourself, then enter the TAB service address.
+- **Custom:** Deploy `cursor-tab-server` yourself, then enter the TAB service address.
 
 After changing TAB settings, restart Cursor and open a new conversation so the new connection takes effect.
 
@@ -185,14 +187,10 @@ make build-desktop  # build Tauri installers
 make build-docker   # build the Docker image
 ```
 
-## Roadmap
-
-The project will continue to improve model compatibility, Agent tooling, local runtime stability, and the self-hosting experience. See the [release roadmap](https://github.com/leookun/cursor-byok/discussions/32) for plans and progress.
-
 ## Community and Support
 
 - [User Guide](https://docs.leokun.cn)
-- [GitHub Issues](https://github.com/leookun/cursor-byok/issues)
+- [GitHub Issues](https://github.com/ApexGP/cursor-byok/issues)
 - [Telegram community](https://t.me/cursor_byok)
 - QQ groups: `1095916242`, `1094411438`, `1095918002`, `1094419321`
 
@@ -204,8 +202,8 @@ Issues and pull requests are welcome. Before submitting code, read [AGENTS.md](.
 
 ## Contributors
 
-<a href="https://github.com/leookun/cursor-byok/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=leookun/cursor-byok" />
+<a href="https://github.com/ApexGP/cursor-byok/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=ApexGP/cursor-byok" />
 </a>
 
 ## License

@@ -28,7 +28,7 @@ use crate::{
 use self::{ca::CaManager, proxy::ProxyRuntime};
 
 pub(crate) fn proxy_host_allowed(host: &str) -> bool {
-    proxy::is_cursor_host(host)
+    proxy::is_managed_host(host)
 }
 
 pub(crate) fn request_uses_local_cursor_token(headers: &axum::http::HeaderMap) -> bool {

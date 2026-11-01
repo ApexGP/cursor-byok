@@ -10,7 +10,7 @@ import { ConfirmDialog } from "../shared/ui/ConfirmDialog";
 import controls from "../shared/ui/Controls.module.scss";
 import { Icon } from "../shared/ui/Icon";
 import { TooltipTrigger } from "../shared/ui/TooltipTrigger";
-import { flatColorAboutIcon, flatColorAreaChartIcon, flatColorCrystalOscillatorIcon, flatColorSalesPerformanceIcon, flatColorSettingsIcon, refreshIcon } from "../shared/ui/icons";
+import { flatColorAboutIcon, flatColorAreaChartIcon, flatColorSalesPerformanceIcon, flatColorSettingsIcon, refreshIcon } from "../shared/ui/icons";
 import { useMessage } from "../shared/ui/message";
 import { VirtualList } from "../shared/virtual/VirtualList";
 import { appStore, useAppStore } from "../shared/store/appStore";
@@ -23,7 +23,7 @@ type MenuItem =
   | { kind: "external"; id: string; label: string; icon: IconifyIcon | string }
   | { kind: "group"; label: string };
 
-const keptAlivePages = ["/", "/calls", "/settings", "/harness/cursor", "/plugins"];
+const keptAlivePages = ["/", "/calls", "/settings", "/harness/cursor"];
 const tutorialReadStorageKey = "cursor-byok:tutorial-read";
 const tutorialUrl = "https://docs.leokun.cn";
 
@@ -48,7 +48,6 @@ export function AppLayout() {
     { kind: "group", label: t("模型配置") },
     { kind: "page", path: "/harness/cursor", label: "Cursor", icon: cursorIconUrl },
     { kind: "group", label: t("设置") },
-    { kind: "page", path: "/plugins", label: t("插件配置"), icon: flatColorCrystalOscillatorIcon },
     { kind: "page", path: "/settings", label: t("系统设置"), icon: flatColorSettingsIcon },
     { kind: "external", id: "tutorial", label: t("使用教程"), icon: flatColorAboutIcon },
   ];

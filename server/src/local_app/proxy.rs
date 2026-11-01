@@ -123,7 +123,7 @@ impl HttpHandler for CursorRelay {
             return request.into();
         }
         let locally_routed = should_route_locally(original.path(), *self.tab_mode.read());
-        if is_cursor_host(original.host().unwrap_or_default()) && locally_routed {
+        if is_managed_host(original.host().unwrap_or_default()) && locally_routed {
             if !is_local_path(original.path()) {
                 log_unhandled_path_once(original.path());
             }
@@ -149,7 +149,7 @@ impl HttpHandler for CursorRelay {
         request
             .uri()
             .authority()
-            .is_some_and(|authority| is_cursor_host(authority.host()))
+            .is_some_and(|authority| is_managed_host(authority.host()))
     }
 
     async fn should_intercept_tls(
@@ -157,13 +157,20 @@ impl HttpHandler for CursorRelay {
         _ctx: &HttpContext,
         hello: hudsucker::rustls::server::ClientHello<'_>,
     ) -> bool {
-        hello.server_name().is_some_and(is_cursor_host)
+        hello.server_name().is_some_and(is_managed_host)
     }
 }
 
-pub fn is_cursor_host(host: &str) -> bool {
+/// Hosts whose traffic must pass through the local backend so it can be
+/// routed to Cursor APIs or forwarded through the configured outbound proxy.
+/// `marketplace.cursorapi.com` is included because the extension gallery is not
+/// a `*.cursor.sh` host; without interception its CONNECT tunnel bypasses the
+/// system proxy and plugin panels load directly.
+pub fn is_managed_host(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
-    matches!(host.as_str(), "api2.cursor.sh" | "api3.cursor.sh") || host.ends_with(".cursor.sh")
+    matches!(host.as_str(), "api2.cursor.sh" | "api3.cursor.sh")
+        || host.ends_with(".cursor.sh")
+        || host.ends_with(".cursorapi.com")
 }
 
 /// Logs each unhandled Cursor path once so a Cursor update that adds a new
@@ -246,6 +253,15 @@ fn is_model_catalog_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_gallery_traffic_is_managed() {
+        assert!(is_managed_host("marketplace.cursorapi.com"));
+        assert!(is_managed_host("API2.CURSOR.SH."));
+        assert!(is_managed_host("api3.cursor.sh"));
+        assert!(!is_managed_host("example.com"));
+        assert!(!is_managed_host("notcursor.sh.example.com"));
+    }
 
     #[test]
     fn cursor_cli_transport_and_model_metadata_routes_stay_local() {

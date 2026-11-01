@@ -208,12 +208,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: actions/download-artifact@v4
         with:
           pattern: legacy-update-*
           path: legacy-update
           merge-multiple: true
+
+      - name: Generate release notes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node .github/scripts/generate-release-notes.mjs \
+            --version "${VERSION}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --output release-notes.md
 
       - name: Generate legacy update manifest
         env:
@@ -280,4 +292,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
-        run: gh release edit "v${VERSION}" --draft=false --latest
+        run: gh release edit "v${VERSION}" --notes-file release-notes.md --draft=false --latest

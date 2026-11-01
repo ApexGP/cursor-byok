@@ -31,13 +31,12 @@ type CursorModelCardsProps = {
   onDuplicate: (model: Model) => void;
   onDelete: (model: Model) => void;
   onTestPluginModel: (model: PluginModelDescriptor) => void;
-  onPluginSettings: (model: PluginModelDescriptor) => void;
   onSetDefault: (modelId: string) => void;
   onReorder: (modelHashes: string[]) => void;
   onGroupSettings: (group: CursorModelGroup) => void;
 };
 
-type ModelGridProps = Omit<CursorModelCardsProps, "grouping" | "pluginModels" | "onTestPluginModel" | "onPluginSettings"> & {
+type ModelGridProps = Omit<CursorModelCardsProps, "grouping" | "pluginModels" | "onTestPluginModel"> & {
   sortable: boolean;
 };
 
@@ -97,7 +96,6 @@ export function CursorModelCards(props: CursorModelCardsProps) {
         testing={props.testingModelHashes.has(model.id)}
         result={props.testResults.get(model.id)}
         onTest={() => props.onTestPluginModel(model)}
-        onSettings={() => props.onPluginSettings(model)}
         onSetDefault={() => props.onSetDefault(model.id)}
       />)}
     </CollapsibleGroup>)}
@@ -184,14 +182,13 @@ function ModelListRow({ model, disabled, isDefault, testing, result, onTest, onE
   </div>;
 }
 
-function PluginModelRow({ model, disabled, isDefault, testing, result, onTest, onSettings, onSetDefault }: {
+function PluginModelRow({ model, disabled, isDefault, testing, result, onTest, onSetDefault }: {
   model: PluginModelDescriptor;
   disabled: boolean;
   isDefault: boolean;
   testing: boolean;
   result: CursorModelTestState | undefined;
   onTest: () => void;
-  onSettings: () => void;
   onSetDefault: () => void;
 }) {
   return <div className={styles.modelRow}>
@@ -203,7 +200,6 @@ function PluginModelRow({ model, disabled, isDefault, testing, result, onTest, o
     <div className={styles.modelCardActions}>
       <DefaultModelControl disabled={disabled} isDefault={isDefault} onSetDefault={onSetDefault} />
       <TruncatedButton size="small" disabled={disabled && !testing} label={testing ? t("取消测试") : t("测试")} onClick={onTest} />
-      <TruncatedButton size="small" disabled={disabled} label={t("设置")} onClick={onSettings} />
     </div>
   </div>;
 }

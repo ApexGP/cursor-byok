@@ -23,8 +23,8 @@ use crate::{
     plugin::{PluginDescriptor, PluginRegistry, PluginRuntime, PluginRuntimeStatus},
     provider::{is_valid_response_event, ModelEvent, Provider},
     store::{
-        CommitSettings, DesktopSettings, ExternalApiSettings, PortSettings, ProxySettings,
-        ProxySettingsInput, StatisticsStorage, Store, TabSettings, TokenPricingSettings,
+        CommitSettings, DesktopSettings, PortSettings, ProxySettings, ProxySettingsInput,
+        StatisticsStorage, Store, TabSettings, TokenPricingSettings,
     },
     Error, Result,
 };
@@ -690,17 +690,6 @@ impl ControlService {
         self.store.port_settings().await
     }
 
-    pub async fn external_api_settings(&self) -> Result<ExternalApiSettings> {
-        self.store.external_api_settings().await
-    }
-
-    pub async fn set_external_api_settings(
-        &self,
-        settings: ExternalApiSettings,
-    ) -> Result<ExternalApiSettings> {
-        self.store.set_external_api_settings(settings).await
-    }
-
     pub async fn set_ports(&self, settings: PortSettings) -> Result<PortSettings> {
         self.store.set_port_settings(settings).await?;
         Ok(settings)
@@ -772,6 +761,7 @@ impl ControlService {
 }
 
 fn call_route(run_id: &str) -> &'static str {
+    // Historical external API calls remain labeled after that endpoint was removed.
     if run_id.starts_with("external-api:") {
         "external_api"
     } else {

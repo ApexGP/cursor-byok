@@ -190,7 +190,7 @@ fn upstream_url(headers: &axum::http::HeaderMap, fallback: &str, path: &str) -> 
     let host = url.host_str().unwrap_or_default();
     if url.scheme() != "https" || !crate::local_app::proxy_host_allowed(host) {
         return Err(crate::Error::Protocol(
-            "upstream URL must target a Cursor HTTPS host".into(),
+            "upstream URL must target a managed HTTPS host".into(),
         ));
     }
     Ok(url.into())

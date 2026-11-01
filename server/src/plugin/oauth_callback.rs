@@ -307,7 +307,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let client = reqwest::Client::new();
+        // Bypass the system proxy: it can intercept localhost and stall the
+        // callback test on machines with a global HTTP proxy.
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let rejected = client
             .get(format!(
                 "{}?state=wrong&code=ignored",

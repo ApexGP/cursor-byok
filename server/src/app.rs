@@ -52,17 +52,6 @@ impl App {
             config.provider_request_timeout,
             config.provider_stream_idle_timeout,
         ));
-        let byok = api::byok::router(
-            store.clone(),
-            plugins.clone(),
-            provider.clone(),
-            Some(api::byok::NativeForwarder::new(
-                store.clone(),
-                clients.clone(),
-                config.provider_request_timeout,
-                config.provider_stream_idle_timeout,
-            )),
-        );
         let registry = TransportRegistry::with_plugins(
             store.clone(),
             provider.clone(),
@@ -82,7 +71,7 @@ impl App {
         // after the listener is bound, so it always uses the actual service
         // port. Skipping the pre-bind sync avoids writing a stale URL twice.
         let harness = control.cursor_harness().clone();
-        let mut router = api::router(registry.clone(), clients)?.merge(byok);
+        let mut router = api::router(registry.clone(), clients)?;
         router = match &config.console {
             Some(ConsoleSource::Directory(directory)) => {
                 router.merge(control::web_router(control.clone(), directory))

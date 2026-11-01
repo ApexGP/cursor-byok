@@ -6,12 +6,14 @@
 
 cursor-byok 是一个开源的本机 Cursor 模型网关。它把 Cursor 的 Agent 请求转发到你配置的 OpenAI / Anthropic 兼容服务，并尽可能保留工具调用、Skills、MCP 和多轮对话能力。
 
-[English](./README.md) · [使用指南](https://docs.leokun.cn) · [下载](https://github.com/leookun/cursor-byok/releases/latest) · [提交问题](https://github.com/leookun/cursor-byok/issues)
+本仓库由 `ApexGP/cursor-byok` 独立维护（已脱离 GitHub fork 网络），发布与自动更新均以本仓库为准。
 
-[![Release](https://img.shields.io/github/v/release/leookun/cursor-byok?style=flat-square)](https://github.com/leookun/cursor-byok/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/leookun/cursor-byok/total?style=flat-square)](https://github.com/leookun/cursor-byok/releases)
-[![License](https://img.shields.io/github/license/leookun/cursor-byok?style=flat-square)](./LICENSE)
-[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square)](https://github.com/leookun/cursor-byok/releases/latest)
+[English](./README.md) · [使用指南](https://docs.leokun.cn) · [下载](https://github.com/ApexGP/cursor-byok/releases/latest) · [提交问题](https://github.com/ApexGP/cursor-byok/issues)
+
+[![Release](https://img.shields.io/github/v/release/ApexGP/cursor-byok?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/ApexGP/cursor-byok/total?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases)
+[![License](https://img.shields.io/github/license/ApexGP/cursor-byok?style=flat-square)](./LICENSE)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases/latest)
 
 </div>
 
@@ -87,7 +89,7 @@ Cursor 的 Tab 补全由独立的 TAB 服务处理，不经过模型通道。你
 
 - **使用公益服务（默认）**：使用项目作者部署的公共服务，无需额外配置。
 - **直连**：直接连接当前 Cursor 账号对应的官方 TAB 服务，适合账号拥有官方额度的情况。
-- **自定义**：自行部署 [cursor-tab-server](https://github.com/leookun/cursor-byok/tree/archive/v0.0.49/cursor-tab-server)，然后填写 TAB 服务地址。
+- **自定义**：自行部署 `cursor-tab-server`，然后填写 TAB 服务地址。
 
 修改 TAB 设置后，建议重启 Cursor 并新开一个对话，确保新的连接方式生效。
 
@@ -185,14 +187,10 @@ make build-desktop  # 构建 Tauri 桌面安装包
 make build-docker   # 构建 Docker 镜像
 ```
 
-## 路线图
-
-项目将继续改进模型兼容性、Agent 工具、本地运行稳定性和自托管体验，并探索支持更多 IDE、聊天和 Agent 工作流。计划与进展请参阅[发布路线图](https://github.com/leookun/cursor-byok/discussions/32)。
-
 ## 社区与反馈
 
 - [中文使用指南](https://docs.leokun.cn/zh/docs)
-- [GitHub Issues](https://github.com/leookun/cursor-byok/issues)
+- [GitHub Issues](https://github.com/ApexGP/cursor-byok/issues)
 - [Telegram 社区](https://t.me/cursor_byok)
 - QQ 群：`1095916242`、`1094411438`、`1095918002`、`1094419321`
 
@@ -205,7 +203,7 @@ make build-docker   # 构建 Docker 镜像
 ## 贡献者
 
 <a href="https://github.com/ApexGP/cursor-byok/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=leookun/cursor-byok" />
+  <img src="https://contrib.rocks/image?repo=ApexGP/cursor-byok" />
 </a>
 
 ## 许可证

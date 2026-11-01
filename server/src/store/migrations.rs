@@ -465,7 +465,7 @@ mod tests {
             .unwrap();
 
             assert_eq!(checksum_after, checksum_before);
-            assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+            assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
             assert_eq!(checkpoint_table_exists, 1);
             assert_eq!(argument_error_column_exists, 1);
             assert_eq!(config_hash_column_exists, 1);
@@ -516,6 +516,40 @@ mod tests {
         .execute(&pool)
         .await;
         assert!(duplicate.is_err());
+    }
+
+    #[tokio::test]
+    async fn removes_the_legacy_external_api_setting() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let historical = migrator_with_line_endings(MigrationLineEndings::Lf);
+        let before_external_api_cleanup = Migrator {
+            migrations: Cow::Owned(historical.iter().take(10).cloned().collect()),
+            ..Migrator::DEFAULT
+        };
+        before_external_api_cleanup.run(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO service_settings(setting_key, value_json, updated_at_ms)
+             VALUES ('external_api', '{\"enabled\":true,\"api_key\":\"secret\"}', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        run(&pool, Path::new("external-api-cleanup.db"))
+            .await
+            .unwrap();
+
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM service_settings WHERE setting_key = 'external_api'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[test]

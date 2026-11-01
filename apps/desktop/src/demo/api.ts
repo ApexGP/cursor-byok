@@ -1,7 +1,6 @@
 import type {
   CallDetail,
   CursorHarnessStatus,
-  ExternalApiSettings,
   LlmCall,
   Model,
   Overview,
@@ -9,6 +8,7 @@ import type {
   ProxySettings,
   StatisticsStorage,
   TabSettings,
+  TokenPricingSettings,
 } from "../shared/api";
 
 const API_ROOT = "/__byok-api__/api";
@@ -87,7 +87,12 @@ let harnessStatus: CursorHarnessStatus = {
 
 let detailed = true;
 let portSettings = { proxy_port: 0, service_port: 0 };
-let externalApiSettings: ExternalApiSettings = { enabled: false, api_key: "" };
+let pricingSettings: TokenPricingSettings = {
+  input_per_million: 5,
+  output_per_million: 25,
+  cache_read_per_million: 0.5,
+  cache_write_per_million: 6.25,
+};
 let proxySettings: ProxySettings = {
   mode: "default",
   address: "",
@@ -159,10 +164,10 @@ export function installDemoApi() {
       portSettings = body as typeof portSettings;
       return json(portSettings);
     }
-    if (path === "/settings/external-api" && method === "GET") return json(externalApiSettings);
-    if (path === "/settings/external-api") {
-      externalApiSettings = body as ExternalApiSettings;
-      return json(externalApiSettings);
+    if (path === "/settings/pricing" && method === "GET") return json(pricingSettings);
+    if (path === "/settings/pricing") {
+      pricingSettings = body as TokenPricingSettings;
+      return json(pricingSettings);
     }
     if (path === "/settings/storage/statistics" && method === "GET") return json(storage);
     if (path === "/settings/storage/statistics") {
@@ -183,6 +188,7 @@ export function installDemoApi() {
     }
     if (path === "/settings/desktop" && method === "GET") return json({ silent_start: false, show_dock_icon: true });
     if (path === "/settings/desktop") return json(body);
+    if (path === "/plugins") return json([]);
     if (path === "/desktop/open-external-url") {
       const target = (body as { url?: string } | null)?.url;
       if (target) {
