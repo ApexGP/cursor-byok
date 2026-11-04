@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { api, type CursorHarnessStatus, type LlmCall, type Model, type ModelInput, type Overview, type PluginDescriptor, type PortSettings, type TokenPricingSettings } from "../api";
+import { api, type CursorHarnessStatus, type LlmCall, type Model, type ModelInput, type Overview, type PortSettings, type TokenPricingSettings } from "../api";
 import { applyTheme, isThemeId, type ThemeId } from "../theme/theme";
 
 export const DEFAULT_TOKEN_PRICING: TokenPricingSettings = {
@@ -22,7 +22,6 @@ export type AppSnapshot = {
   theme: ThemeId;
   cursorHarness: CursorHarnessStatus | null;
   cursorBusy: boolean;
-  plugins: PluginDescriptor[];
 };
 
 const savedTheme = (): ThemeId => {
@@ -57,7 +56,6 @@ let snapshot: AppSnapshot = {
   theme: savedTheme(),
   cursorHarness: null,
   cursorBusy: false,
-  plugins: [],
 };
 
 const listeners = new Set<() => void>();
@@ -86,7 +84,7 @@ export const appStore = {
   async refresh() {
     update({ busy: true, error: null });
     try {
-      const [models, defaultModel, calls, overview, settings, ports, pricing, cursorHarness, plugins] = await Promise.all([
+      const [models, defaultModel, calls, overview, settings, ports, pricing, cursorHarness] = await Promise.all([
         api.models(),
         api.defaultModel(),
         api.calls(),
@@ -95,9 +93,8 @@ export const appStore = {
         api.ports(),
         api.pricingSettings(),
         api.cursorHarness(),
-        api.plugins(),
       ]);
-      update({ models, defaultModelId: defaultModel.model_id, calls, overview, detailed: settings.detailed, ports, pricing, cursorHarness, plugins });
+      update({ models, defaultModelId: defaultModel.model_id, calls, overview, detailed: settings.detailed, ports, pricing, cursorHarness });
     } catch (cause) {
       update({ error: cause instanceof Error ? cause.message : String(cause) });
     } finally {

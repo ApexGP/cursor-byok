@@ -165,7 +165,7 @@ impl HttpHandler for CursorRelay {
 /// routed to Cursor APIs or forwarded through the configured outbound proxy.
 /// `marketplace.cursorapi.com` is included because the extension gallery is not
 /// a `*.cursor.sh` host; without interception its CONNECT tunnel bypasses the
-/// system proxy and plugin panels load directly.
+/// system proxy and extension panels load directly.
 pub fn is_managed_host(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     matches!(host.as_str(), "api2.cursor.sh" | "api3.cursor.sh")

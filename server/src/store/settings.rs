@@ -141,8 +141,8 @@ impl<'de> Deserialize<'de> for CommitPromptLocale {
 /// User preferences for Git commit message generation.
 ///
 /// Empty `model_id` means 直连: forward the original Cursor RPC unchanged.
-/// A non-empty value is the stable identifier of a configured built-in or
-/// plugin model, and the request is generated locally through that model.
+/// A non-empty value is the stable identifier of a configured model, and the
+/// request is generated locally through that model.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub struct CommitSettings {
     #[serde(default)]
@@ -213,8 +213,8 @@ fn read_proxy_settings(value: &str) -> ProxySettingsSecret {
 
 impl Store {
     /// Returns the explicitly persisted default model ID, if any. Callers must
-    /// still resolve it against the currently configured models: a plugin
-    /// model may have been disabled since the value was written.
+    /// still resolve it against the currently configured models: the model may
+    /// have been deleted since the value was written.
     pub async fn default_model_id(&self) -> Result<Option<String>> {
         let value = sqlx::query_scalar::<_, String>(
             "SELECT value_json FROM service_settings WHERE setting_key = ?",

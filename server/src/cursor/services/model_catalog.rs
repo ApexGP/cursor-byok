@@ -12,7 +12,6 @@ use crate::{
     api::cursor::proxy::{self, CursorProxy},
     cursor::{protocol::proto::agent::v1 as agent, transport::TransportRegistry},
     model::{format_token_count, parse_token_count, resolve_default_model_id, ModelConfig},
-    plugin::PluginModelDescriptor,
     Error, Result,
 };
 
@@ -309,22 +308,15 @@ pub async fn available_models(
     request: Request<Body>,
 ) -> Result<Response<Body>> {
     let models = registry.store().models().await?;
-    let plugin_models = match registry.plugins() {
-        Some(plugins) => plugins.configured_models().await,
-        None => Vec::new(),
-    };
     tracing::info!(
         model_count = models.len(),
-        plugin_model_count = plugin_models.len(),
         "appending BYOK models to Cursor AvailableModels"
     );
-    let mut available_models = models.iter().map(available_model).collect::<Vec<_>>();
-    available_models.extend(plugin_models.iter().map(available_plugin_model));
-    let local_count = models.len() + plugin_models.len();
+    let available_models = models.iter().map(available_model).collect::<Vec<_>>();
+    let local_count = models.len();
     let local_names = models
         .iter()
         .map(|model| model.model_hash.clone())
-        .chain(plugin_models.iter().map(|model| model.id.clone()))
         .collect::<Vec<_>>();
     let local = AvailableModelsAddition {
         model_names: local_names.clone(),
@@ -346,21 +338,12 @@ pub async fn usable_models(
     request: Request<Body>,
 ) -> Result<Response<Body>> {
     let models = registry.store().models().await?;
-    let plugin_models = match registry.plugins() {
-        Some(plugins) => plugins.configured_models().await,
-        None => Vec::new(),
-    };
     tracing::info!(
         model_count = models.len(),
-        plugin_model_count = plugin_models.len(),
         "appending BYOK models to Cursor GetUsableModels"
     );
     let local = UsableModelsAddition {
-        models: models
-            .iter()
-            .map(usable_model)
-            .chain(plugin_models.iter().map(usable_plugin_model))
-            .collect(),
+        models: models.iter().map(usable_model).collect(),
     }
     .encode_to_vec();
     match proxy::forward_buffered(&proxy, request).await {
@@ -378,11 +361,9 @@ pub async fn cpp_available_models(
     request: Request<Body>,
 ) -> Result<Response<Body>> {
     let models = registry.store().models().await?;
-    let plugin_models = configured_plugin_models(&registry).await;
     let names = models
         .iter()
         .map(|model| model.model_hash.clone())
-        .chain(plugin_models.iter().map(|model| model.id.clone()))
         .collect::<Vec<_>>();
     let stored_default = registry.store().default_model_id().await?;
     let explicit_default = stored_default
@@ -391,7 +372,6 @@ pub async fn cpp_available_models(
     let local_default = resolve_default_model_id(stored_default.as_deref(), &names);
     tracing::info!(
         model_count = models.len(),
-        plugin_model_count = plugin_models.len(),
         default_model = local_default.as_deref(),
         "appending BYOK models to Cursor CppService AvailableModels"
     );
@@ -430,7 +410,6 @@ pub async fn model_labels(
     request: Request<Body>,
 ) -> Result<Response<Body>> {
     let models = registry.store().models().await?;
-    let plugin_models = configured_plugin_models(&registry).await;
     let local = ModelLabelsResponse {
         model_labels: models
             .iter()
@@ -440,12 +419,6 @@ pub async fn model_labels(
                 short_label: Some(model.display_name.clone()),
                 supports_agent: Some(true),
             })
-            .chain(plugin_models.iter().map(|model| ModelLabel {
-                name: model.id.clone(),
-                label: model.display_name.clone(),
-                short_label: Some(model.display_name.clone()),
-                supports_agent: Some(true),
-            }))
             .collect(),
     };
     match proxy::forward_buffered(&proxy, request).await {
@@ -481,11 +454,10 @@ pub async fn default_model_for_cli(
     State(registry): State<TransportRegistry>,
 ) -> Result<Response<Body>> {
     let models = registry.store().models().await?;
-    let plugin_models = configured_plugin_models(&registry).await;
     let stored = registry.store().default_model_id().await?;
     Ok(local_response(
         agent::GetDefaultModelForCliResponse {
-            model: default_model_details(&models, &plugin_models, stored.as_deref()),
+            model: default_model_details(&models, stored.as_deref()),
         }
         .encode_to_vec(),
     ))
@@ -493,10 +465,9 @@ pub async fn default_model_for_cli(
 
 pub async fn default_model(State(registry): State<TransportRegistry>) -> Result<Response<Body>> {
     let models = registry.store().models().await?;
-    let plugin_models = configured_plugin_models(&registry).await;
     let stored = registry.store().default_model_id().await?;
     Ok(local_response(
-        default_model_response(&models, &plugin_models, stored.as_deref()).encode_to_vec(),
+        default_model_response(&models, stored.as_deref()).encode_to_vec(),
     ))
 }
 
@@ -504,53 +475,35 @@ pub async fn default_model_nudge(
     State(registry): State<TransportRegistry>,
 ) -> Result<Response<Body>> {
     let models = registry.store().models().await?;
-    let plugin_models = configured_plugin_models(&registry).await;
     Ok(local_response(
-        default_model_nudge_response(&models, &plugin_models).encode_to_vec(),
+        default_model_nudge_response(&models).encode_to_vec(),
     ))
-}
-
-async fn configured_plugin_models(registry: &TransportRegistry) -> Vec<PluginModelDescriptor> {
-    match registry.plugins() {
-        Some(plugins) => plugins.configured_models().await,
-        None => Vec::new(),
-    }
 }
 
 fn default_model_details(
     models: &[ModelConfig],
-    plugin_models: &[PluginModelDescriptor],
     stored_default: Option<&str>,
 ) -> Option<agent::ModelDetails> {
-    let model_id = default_model_id(models, plugin_models, stored_default)?;
-    if let Some(model) = models.iter().find(|model| model.model_hash == model_id) {
-        return Some(usable_model(model));
-    }
-    plugin_models
+    let model_id = default_model_id(models, stored_default)?;
+    models
         .iter()
-        .find(|model| model.id == model_id)
-        .map(usable_plugin_model)
+        .find(|model| model.model_hash == model_id)
+        .map(usable_model)
 }
 
-fn default_model_id(
-    models: &[ModelConfig],
-    plugin_models: &[PluginModelDescriptor],
-    stored_default: Option<&str>,
-) -> Option<String> {
+fn default_model_id(models: &[ModelConfig], stored_default: Option<&str>) -> Option<String> {
     let available = models
         .iter()
         .map(|model| model.model_hash.clone())
-        .chain(plugin_models.iter().map(|model| model.id.clone()))
         .collect::<Vec<_>>();
     resolve_default_model_id(stored_default, &available)
 }
 
 fn default_model_response(
     models: &[ModelConfig],
-    plugin_models: &[PluginModelDescriptor],
     stored_default: Option<&str>,
 ) -> DefaultModelResponse {
-    let model = default_model_id(models, plugin_models, stored_default).unwrap_or_default();
+    let model = default_model_id(models, stored_default).unwrap_or_default();
     DefaultModelResponse {
         thinking_model: model.clone(),
         model,
@@ -559,17 +512,13 @@ fn default_model_response(
     }
 }
 
-fn default_model_nudge_response(
-    models: &[ModelConfig],
-    plugin_models: &[PluginModelDescriptor],
-) -> DefaultModelNudgeDataResponse {
+fn default_model_nudge_response(models: &[ModelConfig]) -> DefaultModelNudgeDataResponse {
     DefaultModelNudgeDataResponse {
         nudge_date: "0".into(),
         should_default_switch_on_new_chat: false,
         models_with_no_default_switch: models
             .iter()
             .map(|model| model.model_hash.clone())
-            .chain(plugin_models.iter().map(|model| model.id.clone()))
             .collect(),
         conversion_model_override: String::new(),
     }
@@ -826,8 +775,8 @@ fn available_model(model: &ModelConfig) -> AvailableModel {
         is_recommended_for_background_composer: Some(false),
         supports_plan_mode: Some(true),
         // Cursor treats `is_user_added=true` as a BYOK custom model and filters
-        // it against the account's BYOK entitlement once plugins/account state
-        // load. BYOK models injected by this server look like normal server
+        // it against the account's BYOK entitlement once account state loads.
+        // BYOK models injected by this server look like normal server
         // models instead so the picker keeps them visible.
         is_user_added: None,
         inputbox_short_model_name: Some(model.display_name.clone()),
@@ -1050,78 +999,14 @@ fn model_tooltip(model: &ModelConfig) -> TooltipData {
     }
 }
 
-fn available_plugin_model(model: &PluginModelDescriptor) -> AvailableModel {
-    let tooltip = TooltipData {
-        markdown_content: model.description.clone(),
-    };
-    // Effort 与上下文档位由宿主统一提供,与内置模型一致;插件不再声明这两项。
-    let contexts = context_options(None);
-    let variants = model_variants(&model.id, &model.display_name, &tooltip, &contexts, true);
-    let legacy_slugs: Vec<String> = variants
-        .iter()
-        .filter_map(|variant| variant.legacy_slug.clone())
-        .collect();
-    AvailableModel {
-        name: model.id.clone(),
-        default_on: true,
-        is_chat_only: None,
-        supports_agent: Some(true),
-        degradation_status: Some(0),
-        tooltip_data: Some(tooltip.clone()),
-        supports_thinking: Some(true),
-        supports_images: Some(model.images),
-        supports_auto_context: None,
-        supports_max_mode: Some(false),
-        context_token_limit: None,
-        context_token_limit_for_max_mode: None,
-        client_display_name: Some(model.display_name.clone()),
-        server_model_name: Some(model.id.clone()),
-        supports_non_max_mode: Some(true),
-        tooltip_data_for_max_mode: Some(tooltip.clone()),
-        is_recommended_for_background_composer: Some(false),
-        supports_plan_mode: Some(true),
-        is_user_added: None,
-        inputbox_short_model_name: Some(model.display_name.clone()),
-        supports_sandboxing: Some(true),
-        supports_cmd_k: Some(false),
-        only_supports_cmd_k: None,
-        parameter_definitions: model_parameters(&contexts, true),
-        variants,
-        is_hidden: None,
-        id_aliases: Vec::new(),
-        legacy_slugs,
-        named_model_section_index: Some(1),
-        visible_in_routed_model_view: None,
-        vendor_name: Some(model.provider_type.clone()),
-        vendor: Some(AvailableModelVendor {
-            id: 6,
-            display_name: model.provider_type.clone(),
-        }),
-        default_disabled_in_admin_allowlist: None,
-        model_picker_badges: vec![ModelPickerBadge {
-            label: model.plugin_name.clone(),
-            variant: 1,
-            dismiss_on_selection: false,
-        }],
-    }
-}
-
 /// Serializes the same catalog entries Cursor receives over the wire into the
 /// camelCase JSON shape it persists in `state.vscdb`. Used by the local model
 /// cache synchronizer so the picker keeps BYOK models after the agent-host
 /// module refreshes its own official-only catalog.
-pub(crate) fn cursor_catalog_entries(
-    models: &[ModelConfig],
-    plugins: &[PluginModelDescriptor],
-) -> Vec<Value> {
+pub(crate) fn cursor_catalog_entries(models: &[ModelConfig]) -> Vec<Value> {
     models
         .iter()
         .map(|model| available_model_json(&available_model(model)))
-        .chain(
-            plugins
-                .iter()
-                .map(|model| available_model_json(&available_plugin_model(model))),
-        )
         .collect()
 }
 
@@ -1377,18 +1262,6 @@ fn cli_local_model_credentials() -> agent::model_details::Credentials {
     })
 }
 
-fn usable_plugin_model(model: &PluginModelDescriptor) -> agent::ModelDetails {
-    agent::ModelDetails {
-        model_id: model.id.clone(),
-        display_model_id: model.id.clone(),
-        display_name: model.display_name.clone(),
-        display_name_short: model.display_name.clone(),
-        thinking_details: Some(agent::ThinkingDetails::default()),
-        credentials: Some(cli_local_model_credentials()),
-        ..Default::default()
-    }
-}
-
 fn usable_model(model: &ModelConfig) -> agent::ModelDetails {
     agent::ModelDetails {
         model_id: model.model_hash.clone(),
@@ -1452,32 +1325,6 @@ mod tests {
     }
 
     #[test]
-    fn cli_plugin_model_details_use_local_routing_credentials() {
-        let details = usable_plugin_model(&PluginModelDescriptor {
-            id: "plugin:test/provider/model".into(),
-            plugin_id: "plugin:test".into(),
-            plugin_name: "Test Plugin".into(),
-            provider_id: "provider".into(),
-            model_id: "model".into(),
-            display_name: "Plugin Model".into(),
-            description: None,
-            icon: String::new(),
-            provider_type: "test".into(),
-            max_output_tokens: None,
-            images: false,
-            enabled: true,
-        });
-        assert_eq!(details.model_id, "plugin:test/provider/model");
-        let agent::model_details::Credentials::ApiKeyCredentials(credentials) =
-            details.credentials.expect("API credentials")
-        else {
-            panic!("expected API key credentials");
-        };
-        assert_eq!(credentials.api_key, CLI_LOCAL_MODEL_API_KEY);
-        assert_eq!(credentials.base_url, None);
-    }
-
-    #[test]
     fn local_models_look_like_normal_server_models() {
         let available = available_model(&model());
         assert_eq!(available.is_user_added, None);
@@ -1531,22 +1378,22 @@ mod tests {
         second.display_name = "Second Model".into();
         let models = vec![model(), second];
 
-        let details = default_model_details(&models, &[], None).expect("default model");
+        let details = default_model_details(&models, None).expect("default model");
         assert_eq!(details.model_id, "local-model-hash");
 
         let details =
-            default_model_details(&models, &[], Some("second-model-hash")).expect("default model");
+            default_model_details(&models, Some("second-model-hash")).expect("default model");
         assert_eq!(details.model_id, "second-model-hash");
         assert_eq!(details.display_name, "Second Model");
 
-        let response = default_model_response(&models, &[], Some("second-model-hash"));
+        let response = default_model_response(&models, Some("second-model-hash"));
         assert_eq!(response.model, "second-model-hash");
         assert_eq!(response.thinking_model, "second-model-hash");
 
-        let stale = default_model_response(&models, &[], Some("deleted-model"));
+        let stale = default_model_response(&models, Some("deleted-model"));
         assert_eq!(stale.model, "local-model-hash");
 
-        let nudge = default_model_nudge_response(&models, &[]);
+        let nudge = default_model_nudge_response(&models);
         assert_eq!(
             nudge.models_with_no_default_switch,
             vec!["local-model-hash", "second-model-hash"]

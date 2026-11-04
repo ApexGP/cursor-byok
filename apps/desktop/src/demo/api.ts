@@ -188,7 +188,6 @@ export function installDemoApi() {
     }
     if (path === "/settings/desktop" && method === "GET") return json({ silent_start: false, show_dock_icon: true });
     if (path === "/settings/desktop") return json(body);
-    if (path === "/plugins") return json([]);
     if (path === "/desktop/open-external-url") {
       const target = (body as { url?: string } | null)?.url;
       if (target) {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, configuredPluginModels, type Model, type ModelInput } from "../../shared/api";
+import { api, type Model, type ModelInput } from "../../shared/api";
 import { CursorCaGate, CursorCaProvider, CursorModelGate, CursorModelProvider } from "./CursorGates";
 import { CursorModelCards, cursorModelGroups, type CursorModelGroup, type CursorModelGrouping } from "./CursorModelCards";
 import { CursorModelEditor, emptyCursorModelDraft, type CursorModelDraft } from "./CursorModelEditor";
@@ -20,7 +20,7 @@ import { PageActions } from "../../shell/PageActions";
 import { appStore, useAppStore } from "../../shared/store/appStore";
 
 export function CursorSettingsPage() {
-  const { models, defaultModelId, cursorHarness, cursorBusy, plugins } = useAppStore();
+  const { models, defaultModelId, cursorHarness, cursorBusy } = useAppStore();
   const message = useMessage();
   const [draft, setDraft] = useState<CursorModelDraft | null>(null);
   const [editing, setEditing] = useState<Model | null>(null);
@@ -44,11 +44,7 @@ export function CursorSettingsPage() {
   const caReady = cursorHarness?.ca === "ready";
   const cursorTakenOver = cursorHarness?.settings_applied ?? false;
   const takeoverLabel = cursorTakenOver ? t("关闭接管Cursor") : t("开启接管Cursor");
-  const pluginModels = configuredPluginModels(plugins);
-  const testTargets = [
-    ...models.map((model) => ({ model_hash: model.model_hash, display_name: model.display_name })),
-    ...pluginModels.map((model) => ({ model_hash: model.id, display_name: model.displayName })),
-  ];
+  const testTargets = models.map((model) => ({ model_hash: model.model_hash, display_name: model.display_name }));
   const providerGroups = cursorModelGroups(models, "provider");
   const typeGroups = cursorModelGroups(models, "type");
   const canGroupByProvider = providerGroups.length > 1;
@@ -258,7 +254,6 @@ export function CursorSettingsPage() {
 
   const list = <CursorModelCards
     models={models}
-    pluginModels={pluginModels}
     grouping={grouping}
     disabled={cursorBusy}
     defaultModelId={defaultModelId}
@@ -268,7 +263,6 @@ export function CursorSettingsPage() {
     onEdit={openEdit}
     onDuplicate={(model) => void duplicateModel(model)}
     onDelete={setDeleting}
-    onTestPluginModel={(model) => void testModel({ model_hash: model.id, display_name: model.displayName })}
     onSetDefault={(modelId) => void appStore.setDefaultModel(modelId)}
     onReorder={reorderModels}
     onGroupSettings={openGroupSettings}
@@ -294,10 +288,9 @@ export function CursorSettingsPage() {
   const editorTestState = editing ? modelTestResults.get(editing.model_hash) : undefined;
   const editorTesting = Boolean(editing && testingModelHashes.has(editing.model_hash));
   const activeGroups = grouping === "provider" ? providerGroups : typeGroups;
-  const pluginSectionHeight = pluginModels.length > 0 ? 60 + pluginModels.length * 56 : 0;
   const estimatedModelHeight = grouping === "flat"
-    ? Math.max(380, Math.ceil(models.length / 3) * 196 + pluginSectionHeight)
-    : Math.max(380, activeGroups.reduce((height, group) => height + 60 + group.models.length * 56, 0) + Math.max(0, activeGroups.length - 1) * 20 + pluginSectionHeight);
+    ? Math.max(380, Math.ceil(models.length / 3) * 196)
+    : Math.max(380, activeGroups.reduce((height, group) => height + 60 + group.models.length * 56, 0) + Math.max(0, activeGroups.length - 1) * 20);
 
   return <>
     <PageActions position="left">

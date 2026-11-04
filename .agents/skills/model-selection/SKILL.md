@@ -19,16 +19,15 @@ apps/desktop/src/
     └── settings/                    # Builds Commit single-select options and persists selection
 
 server/src/
-├── cursor/services/commit_message.rs # Validates built-in/plugin IDs and creates Commit invocation
-├── provider/router.rs                # Routes stable IDs to built-in or plugin providers
-└── plugin/registry.rs                # Resolves plugin model IDs and executes plugin streams
+├── cursor/services/commit_message.rs # Validates configured model IDs and creates Commit invocation
+└── provider/router.rs                # Routes stable IDs to the configured model adapters
 ```
 
 ## Component boundary
 
 - Use `ModelSelect` when choosing one or more existing configured models.
 - Do not implement another model dropdown, reuse generic `Select`, or add a compatibility wrapper for configured-model selection.
-- Keep `ModelSelect` presentation-only. Pages own model/plugin state, option construction, filtering, and persistence.
+- Keep `ModelSelect` presentation-only. Pages own model state, option construction, filtering, and persistence.
 - Keep editable model-ID entry in `Combobox`; creating or editing a model identifier is input, not configured-model selection.
 - Delete replaced model-selection components, exports, styles, helpers, and compatibility paths once references are gone.
 
@@ -36,12 +35,12 @@ server/src/
 
 Construct every `ModelSelectOption` with:
 
-- `value`: stable persisted/request identifier. Built-in models use `model_hash`; plugin models use plugin model `id`.
+- `value`: stable persisted/request identifier, always `model_hash`.
 - `label`: user-facing model display name.
 - `group`: supplier display name.
 - `icon`/`iconSrc`: model/provider icon when available.
 
-For built-in models, derive `group` with `modelProviderName(model)`. It uses the configured `group_name` first and the API hostname otherwise. For plugin models, use the localized provider display name.
+Derive `group` with `modelProviderName(model)`. It uses the configured `group_name` first and the API hostname otherwise.
 
 Preserve source order within each supplier. The first occurrence of a supplier determines group order.
 
@@ -60,9 +59,9 @@ Multiple owner value: string[]
 - Multiple mode supports toggling, clearing, selecting all, and selecting none.
 - In multiple mode, every supplier header has a checkbox: unchecked means none selected, checked means all selected, and indeterminate means some selected. Toggling it selects or clears that supplier.
 - Indent child model rows relative to their supplier header so hierarchy remains visible.
-- Commit always uses single mode and includes both configured built-in and configured plugin models. Its `直连` option has value `""`, belongs to the `Cursor` group, and is the first option.
+- Commit always uses single mode and includes configured models only. Its `直连` option has value `""`, belongs to the `Cursor` group, and is the first option.
 - Commit settings follow the settings-card edit-state pattern: read mode shows the persisted model, Edit creates a local draft, selection only changes that draft, Cancel restores the persisted value, and Save persists once before returning to read mode.
-- Persist the stable plugin model `id` unchanged. Commit generation validates that identifier through `PluginRegistry`, then lets `ProviderRouter` dispatch it; do not query the built-in model table for plugin IDs.
+- Persist the stable `model_hash` unchanged. Commit generation validates that identifier against `model_configs`, then lets `ProviderRouter` dispatch it.
 - Overview filtering uses multiple mode.
 
 ## Floating-menu invariants

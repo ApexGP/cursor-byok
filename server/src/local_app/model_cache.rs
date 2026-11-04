@@ -18,10 +18,7 @@ use serde_json::{json, Map, Value};
 use sqlx::{sqlite::SqliteConnectOptions, Connection, Row, SqliteConnection};
 
 use crate::{
-    cursor::services::model_catalog::cursor_catalog_entries,
-    model::ModelConfig,
-    plugin::{PluginModelDescriptor, PluginRegistry},
-    store::Store,
+    cursor::services::model_catalog::cursor_catalog_entries, model::ModelConfig, store::Store,
     Error, Result,
 };
 
@@ -43,11 +40,7 @@ const AGENT_RETRIES_GATE: &str = "nal_agent_retries";
 /// drop entries.
 static SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-pub async fn sync_with(
-    store: &Store,
-    plugins: Option<&PluginRegistry>,
-    service_url: Option<&str>,
-) -> Result<CursorCatalogSync> {
+pub async fn sync_with(store: &Store, service_url: Option<&str>) -> Result<CursorCatalogSync> {
     let _guard = SYNC_LOCK.lock().await;
     if super::process::cursor_running().await? {
         // Cursor keeps applicationUser in memory and periodically flushes it.
@@ -63,26 +56,17 @@ pub async fn sync_with(
         return Ok(CursorCatalogSync::default());
     }
     let models = store.models().await?;
-    let plugin_models = match plugins {
-        Some(plugins) => plugins.configured_models().await,
-        None => Vec::new(),
-    };
-    sync_at_with_service(&path, &models, &plugin_models, service_url).await
+    sync_at_with_service(&path, &models, service_url).await
 }
 
 #[cfg(test)]
-pub(crate) async fn sync_at(
-    path: &Path,
-    models: &[ModelConfig],
-    plugins: &[PluginModelDescriptor],
-) -> Result<CursorCatalogSync> {
-    sync_at_with_service(path, models, plugins, None).await
+pub(crate) async fn sync_at(path: &Path, models: &[ModelConfig]) -> Result<CursorCatalogSync> {
+    sync_at_with_service(path, models, None).await
 }
 
 pub(crate) async fn sync_at_with_service(
     path: &Path,
     models: &[ModelConfig],
-    plugins: &[PluginModelDescriptor],
     service_url: Option<&str>,
 ) -> Result<CursorCatalogSync> {
     let options = SqliteConnectOptions::new()
@@ -110,7 +94,7 @@ pub(crate) async fn sync_at_with_service(
         .as_object_mut()
         .ok_or_else(|| Error::Config("Cursor applicationUser state is not an object".into()))?;
 
-    let entries = cursor_catalog_entries(models, plugins);
+    let entries = cursor_catalog_entries(models);
     let new_ids = entries
         .iter()
         .filter_map(|entry| entry.get("name").and_then(Value::as_str))
@@ -487,7 +471,7 @@ mod tests {
         )
         .await;
 
-        sync_at(&path, &[model()], &[]).await.unwrap();
+        sync_at(&path, &[model()]).await.unwrap();
 
         let state = read(&path).await;
         let catalog = state["availableDefaultModels2"].as_array().unwrap();
@@ -509,7 +493,7 @@ mod tests {
 
         let settings = &state["aiSettings"];
         // Visibility is Cursor-owned: the sync must not add, remove, or reorder
-        // these entries, even for local/plugin models.
+        // these entries, even for local models.
         assert_eq!(
             settings["modelOverrideEnabled"],
             json!(["official", "stale"])
@@ -543,7 +527,7 @@ mod tests {
         )
         .await;
 
-        sync_at(&path, &[model()], &[]).await.unwrap();
+        sync_at(&path, &[model()]).await.unwrap();
 
         let state = read(&path).await;
         let settings = &state["aiSettings"];
@@ -560,7 +544,7 @@ mod tests {
     async fn skips_the_write_when_the_state_is_already_current() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.vscdb");
-        let entry = crate::cursor::services::model_catalog::cursor_catalog_entries(&[model()], &[])
+        let entry = crate::cursor::services::model_catalog::cursor_catalog_entries(&[model()])
             .into_iter()
             .next()
             .expect("catalog entry");
@@ -578,7 +562,7 @@ mod tests {
         .await;
         let before = read_raw(&path).await;
 
-        sync_at(&path, &[model()], &[]).await.unwrap();
+        sync_at(&path, &[model()]).await.unwrap();
 
         assert_eq!(read_raw(&path).await, before);
         assert!(!path.with_extension(BACKUP_EXTENSION).exists());
@@ -619,7 +603,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        sync_at(&path, &[model()], &[]).await.unwrap();
+        sync_at(&path, &[model()]).await.unwrap();
 
         let mut connection = SqliteConnection::connect(&format!("sqlite:{}", path.display()))
             .await
@@ -657,7 +641,7 @@ mod tests {
         )
         .await;
 
-        sync_at_with_service(&path, &[model()], &[], Some("http://127.0.0.1:59112"))
+        sync_at_with_service(&path, &[model()], Some("http://127.0.0.1:59112"))
             .await
             .unwrap();
 
@@ -705,7 +689,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        sync_at_with_service(&path, &[model()], &[], Some("http://127.0.0.1:59112"))
+        sync_at_with_service(&path, &[model()], Some("http://127.0.0.1:59112"))
             .await
             .unwrap();
 
@@ -752,7 +736,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        assert!(sync_at(&path, &[model()], &[]).await.is_err());
+        assert!(sync_at(&path, &[model()]).await.is_err());
         assert!(!path.with_extension(BACKUP_EXTENSION).exists());
     }
 
@@ -765,7 +749,7 @@ mod tests {
             .create_if_missing(true);
         SqliteConnection::connect_with(&options).await.unwrap();
 
-        sync_at(&path, &[model()], &[]).await.unwrap();
+        sync_at(&path, &[model()]).await.unwrap();
         assert!(!path.with_extension(BACKUP_EXTENSION).exists());
     }
 }

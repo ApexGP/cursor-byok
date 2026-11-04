@@ -20,7 +20,6 @@ use crate::{
         ModelInvocation, ModelRequest, ModelSpec, ModelType, Overview, ProjectedContent,
         ProjectedMessage, PromptSpec, ProviderType, Role,
     },
-    plugin::{PluginDescriptor, PluginRegistry, PluginRuntime, PluginRuntimeStatus},
     provider::{is_valid_response_event, ModelEvent, Provider},
     store::{
         CommitSettings, DesktopSettings, PortSettings, ProxySettings, ProxySettingsInput,
@@ -34,8 +33,6 @@ pub struct ControlService {
     store: Store,
     cursor_harness: CursorHarness,
     provider: Arc<dyn Provider>,
-    plugin_runtime: PluginRuntime,
-    plugins: PluginRegistry,
     clients: crate::network::NetworkClients,
     model_tests: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
 }
@@ -145,18 +142,13 @@ impl ControlService {
     pub fn new(
         store: Store,
         provider: Arc<dyn Provider>,
-        plugin_runtime: PluginRuntime,
-        plugins: PluginRegistry,
         clients: crate::network::NetworkClients,
     ) -> Result<Self> {
         let cursor_harness = CursorHarness::new(store.clone())?;
-        cursor_harness.set_plugins(plugins.clone());
         Ok(Self {
             cursor_harness,
             store,
             provider,
-            plugin_runtime,
-            plugins,
             clients,
             model_tests: Arc::new(Mutex::new(BTreeMap::new())),
         })
@@ -166,9 +158,9 @@ impl ControlService {
         &self.cursor_harness
     }
 
-    /// Mirrors the configured built-in and plugin models into Cursor's persisted
-    /// catalog so the picker keeps them after the agent-host module refreshes
-    /// its official-only catalog.
+    /// Mirrors the configured models into Cursor's persisted catalog so the
+    /// picker keeps them after the agent-host module refreshes its
+    /// official-only catalog.
     pub(crate) async fn sync_cursor_model_cache(
         &self,
     ) -> Result<crate::local_app::model_cache::CursorCatalogSync> {
@@ -177,128 +169,13 @@ impl ControlService {
         }
         let port = self.store.port_settings().await?.service_port;
         let service_url = (port != 0).then(|| format!("http://127.0.0.1:{port}"));
-        crate::local_app::model_cache::sync_with(
-            &self.store,
-            Some(&self.plugins),
-            service_url.as_deref(),
-        )
-        .await
+        crate::local_app::model_cache::sync_with(&self.store, service_url.as_deref()).await
     }
 
     pub(crate) async fn sync_cursor_model_cache_best_effort(&self) {
         if let Err(error) = self.sync_cursor_model_cache().await {
             tracing::warn!(%error, "failed to sync Cursor model cache");
         }
-    }
-
-    pub async fn plugins(&self) -> Vec<PluginDescriptor> {
-        self.plugins.plugins().await
-    }
-
-    pub async fn plugin_oauth_begin(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        method_id: &str,
-    ) -> Result<crate::plugin::OAuthBeginResponse> {
-        self.plugins
-            .oauth_begin(plugin_id, resource_type, method_id)
-            .await
-    }
-
-    pub async fn plugin_oauth_poll(
-        &self,
-        session_id: &str,
-    ) -> Result<crate::plugin::OAuthPollResponse> {
-        self.plugins.oauth_poll(session_id).await
-    }
-
-    pub async fn plugin_import(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        files: serde_json::Value,
-    ) -> Result<crate::plugin::ImportResponse> {
-        self.plugins
-            .import_resources(plugin_id, resource_type, files)
-            .await
-    }
-
-    pub async fn plugin_export_resources(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-    ) -> Result<serde_json::Value> {
-        self.plugins
-            .export_resources(plugin_id, resource_type)
-            .await
-    }
-
-    pub async fn plugin_refresh_resource(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        resource_id: &str,
-    ) -> Result<()> {
-        self.plugins
-            .refresh_resource(plugin_id, resource_type, resource_id)
-            .await
-    }
-
-    pub async fn plugin_resource_action(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        resource_id: &str,
-        action_id: &str,
-        input: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        self.plugins
-            .resource_action(plugin_id, resource_type, resource_id, action_id, input)
-            .await
-    }
-
-    pub async fn plugin_delete_resource(
-        &self,
-        plugin_id: &str,
-        resource_type: &str,
-        resource_id: &str,
-    ) -> Result<()> {
-        self.plugins
-            .delete_resource(plugin_id, resource_type, resource_id)
-            .await
-    }
-
-    pub async fn plugin_sync_models(&self, plugin_id: &str, provider_id: &str) -> Result<usize> {
-        self.plugins.sync_models(plugin_id, provider_id).await
-    }
-
-    pub async fn plugin_set_model_enabled(
-        &self,
-        plugin_id: &str,
-        provider_id: &str,
-        model_id: &str,
-        enabled: bool,
-    ) -> Result<()> {
-        self.plugins
-            .set_model_enabled(plugin_id, provider_id, model_id, enabled)
-            .await
-    }
-
-    pub async fn remove_plugin_configuration(&self, plugin_id: &str) -> Result<()> {
-        self.plugins.remove(plugin_id).await
-    }
-
-    pub fn plugin_runtime_status(&self) -> PluginRuntimeStatus {
-        self.plugin_runtime.status()
-    }
-
-    pub fn initialize_plugin_runtime(&self) -> PluginRuntimeStatus {
-        self.plugin_runtime.initialize(self.store.clone())
-    }
-
-    pub fn cancel_plugin_runtime_initialization(&self) -> PluginRuntimeStatus {
-        self.plugin_runtime.cancel_initialization()
     }
 
     pub async fn models(&self) -> Result<Vec<ModelConfig>> {
@@ -326,12 +203,12 @@ impl ControlService {
     }
 
     async fn available_model_ids(&self) -> Result<Vec<String>> {
-        let models = self.store.models().await?;
-        let plugin_models = self.plugins.configured_models().await;
-        Ok(models
+        Ok(self
+            .store
+            .models()
+            .await?
             .iter()
             .map(|model| model.model_hash.clone())
-            .chain(plugin_models.iter().map(|model| model.id.clone()))
             .collect())
     }
 
@@ -419,19 +296,13 @@ impl ControlService {
         const TEST_PROMPT: &str = "Output the numbers 1 through 120 separated by a single space. No commas, no newlines, no explanation.";
 
         let mut model = ModelSpec::new(model_hash);
-        if model_hash.starts_with(crate::plugin::ADAPTER_ID_PREFIX) {
-            let descriptor = self.plugins.model_descriptor(model_hash).await?;
-            model.display_name = Some(descriptor.display_name);
-            model.max_output_tokens = Some(descriptor.max_output_tokens.unwrap_or(65_536));
-        } else {
-            let configured = self
-                .store
-                .model(model_hash)
-                .await?
-                .ok_or_else(|| Error::RunNotFound(format!("model {model_hash}")))?;
-            configured.configure(&mut model);
-            model.max_output_tokens = Some(configured.max_output_tokens().unwrap_or(65_536));
-        }
+        let configured = self
+            .store
+            .model(model_hash)
+            .await?
+            .ok_or_else(|| Error::RunNotFound(format!("model {model_hash}")))?;
+        configured.configure(&mut model);
+        model.max_output_tokens = Some(configured.max_output_tokens().unwrap_or(65_536));
         let call_id = format!("model-test-{}", uuid::Uuid::new_v4());
         let invocation = ModelInvocation {
             call_id: call_id.clone(),
@@ -871,11 +742,6 @@ async fn discover_models_from_endpoint(
         }
         ProviderType::Anthropic => {
             anthropic_models(client, base_url, api_key, custom_headers).await?
-        }
-        ProviderType::Plugin => {
-            return Err(Error::Config(
-                "plugin providers discover models through their plugin".into(),
-            ))
         }
     };
     models.sort();

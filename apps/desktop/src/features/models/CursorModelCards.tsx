@@ -1,7 +1,7 @@
 import type { IconifyIcon } from "@iconify/react/offline";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import Sortable from "sortablejs";
-import type { Model, PluginModelDescriptor } from "../../shared/api";
+import type { Model } from "../../shared/api";
 import { Card } from "../../shared/ui/Card";
 import { Icon } from "../../shared/ui/Icon";
 import { chevronDownIcon, chevronRightIcon, claudeIcon, dragIcon, editIcon, flatColorOrganizationIcon, openAiIcon } from "../../shared/ui/icons";
@@ -20,7 +20,6 @@ export type CursorModelGroup = {
 
 type CursorModelCardsProps = {
   models: Model[];
-  pluginModels: PluginModelDescriptor[];
   grouping: CursorModelGrouping;
   disabled: boolean;
   defaultModelId: string | null;
@@ -30,13 +29,12 @@ type CursorModelCardsProps = {
   onEdit: (model: Model) => void;
   onDuplicate: (model: Model) => void;
   onDelete: (model: Model) => void;
-  onTestPluginModel: (model: PluginModelDescriptor) => void;
   onSetDefault: (modelId: string) => void;
   onReorder: (modelHashes: string[]) => void;
   onGroupSettings: (group: CursorModelGroup) => void;
 };
 
-type ModelGridProps = Omit<CursorModelCardsProps, "grouping" | "pluginModels" | "onTestPluginModel"> & {
+type ModelGridProps = Omit<CursorModelCardsProps, "grouping"> & {
   sortable: boolean;
 };
 
@@ -80,45 +78,12 @@ export function CursorModelCards(props: CursorModelCardsProps) {
         />)}
       </CollapsibleGroup>)}
     </div>;
-  return <div className={styles.modelGroups}>
-    {builtins}
-    {pluginGroups(props.pluginModels).map((group) => <CollapsibleGroup
-      key={`${props.grouping}:${group.pluginId}`}
-      label={group.pluginName}
-      iconSrc={group.icon}
-      defaultOpen={props.grouping === "flat"}
-    >
-      {group.models.map((model) => <PluginModelRow
-        key={model.id}
-        model={model}
-        disabled={props.disabled}
-        isDefault={model.id === props.defaultModelId}
-        testing={props.testingModelHashes.has(model.id)}
-        result={props.testResults.get(model.id)}
-        onTest={() => props.onTestPluginModel(model)}
-        onSetDefault={() => props.onSetDefault(model.id)}
-      />)}
-    </CollapsibleGroup>)}
-  </div>;
+  return <div className={styles.modelGroups}>{builtins}</div>;
 }
 
-function pluginGroups(models: PluginModelDescriptor[]) {
-  const groups: { pluginId: string; pluginName: string; icon: string; models: PluginModelDescriptor[] }[] = [];
-  for (const model of models) {
-    let group = groups.find((candidate) => candidate.pluginId === model.pluginId);
-    if (!group) {
-      group = { pluginId: model.pluginId, pluginName: model.pluginName, icon: model.icon, models: [] };
-      groups.push(group);
-    }
-    group.models.push(model);
-  }
-  return groups;
-}
-
-function CollapsibleGroup({ label, icon, iconSrc, defaultOpen = true, onSettings, children }: {
+function CollapsibleGroup({ label, icon, defaultOpen = true, onSettings, children }: {
   label: string;
   icon?: IconifyIcon;
-  iconSrc?: string;
   defaultOpen?: boolean;
   onSettings?: () => void;
   children: ReactNode;
@@ -133,7 +98,6 @@ function CollapsibleGroup({ label, icon, iconSrc, defaultOpen = true, onSettings
         onClick={() => setOpen((current) => !current)}
       >
         {icon && <Icon icon={icon} size="1.1em" />}
-        {iconSrc && <Icon src={iconSrc} size="1.1em" />}
         <span className={styles.groupLabel}>{label}</span>
       </button>
       {onSettings && <button type="button" className={styles.groupSettings} onClick={onSettings}>
@@ -178,28 +142,6 @@ function ModelListRow({ model, disabled, isDefault, testing, result, onTest, onE
       <TruncatedButton size="small" disabled={disabled} label={t("编辑")} onClick={onEdit} />
       <TruncatedButton size="small" disabled={disabled} label={t("复制")} onClick={onDuplicate} />
       <TruncatedButton size="small" className={styles.deleteButton} disabled={disabled} label={t("删除")} onClick={onDelete} />
-    </div>
-  </div>;
-}
-
-function PluginModelRow({ model, disabled, isDefault, testing, result, onTest, onSetDefault }: {
-  model: PluginModelDescriptor;
-  disabled: boolean;
-  isDefault: boolean;
-  testing: boolean;
-  result: CursorModelTestState | undefined;
-  onTest: () => void;
-  onSetDefault: () => void;
-}) {
-  return <div className={styles.modelRow}>
-    <div className={styles.modelRowName}>
-      <span className={styles.modelRowNameText}>{model.displayName}</span>
-      <span className={styles.modelRowModelId}>{model.modelId}</span>
-    </div>
-    <CursorModelTestResult compact state={result} testing={testing} />
-    <div className={styles.modelCardActions}>
-      <DefaultModelControl disabled={disabled} isDefault={isDefault} onSetDefault={onSetDefault} />
-      <TruncatedButton size="small" disabled={disabled && !testing} label={testing ? t("取消测试") : t("测试")} onClick={onTest} />
     </div>
   </div>;
 }

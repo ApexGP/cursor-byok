@@ -13,7 +13,6 @@ use crate::{
         transport::TransportRegistry,
     },
     local_app::CursorHarness,
-    plugin::{PluginRegistry, PluginRuntime},
     provider::ProviderRouter,
     search::WebCache,
     store::Store,
@@ -38,35 +37,21 @@ impl App {
         }
         let assets = PromptAssets::embedded()?;
         let compiler = PromptCompiler::new(assets);
-        let plugin_runtime = PluginRuntime::managed()?;
-        let plugins = PluginRegistry::managed(
-            store.clone(),
-            plugin_runtime.clone(),
-            config.app_version.clone(),
-        )?;
         let clients = crate::network::NetworkClients::new(store.clone());
         let provider = std::sync::Arc::new(ProviderRouter::new(
             store.clone(),
-            plugins.clone(),
             clients.clone(),
             config.provider_request_timeout,
             config.provider_stream_idle_timeout,
         ));
-        let registry = TransportRegistry::with_plugins(
+        let registry = TransportRegistry::with_web_cache_and_local_rules(
             store.clone(),
             provider.clone(),
             compiler,
             WebCache::managed()?,
-            plugins.clone(),
             crate::config::managed_data_dir()?.join("rules"),
         );
-        let control = control::ControlService::new(
-            store.clone(),
-            provider,
-            plugin_runtime,
-            plugins,
-            clients.clone(),
-        )?;
+        let control = control::ControlService::new(store.clone(), provider, clients.clone())?;
         // Desktop startup syncs the catalog from `CursorHarness::restore()`
         // after the listener is bound, so it always uses the actual service
         // port. Skipping the pre-bind sync avoids writing a stale URL twice.

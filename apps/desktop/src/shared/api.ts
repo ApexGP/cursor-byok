@@ -170,62 +170,6 @@ export interface TokenPricingSettings {
   cache_write_per_million: number;
 }
 
-/** 插件提供的显示文本:纯字符串或 locale → 文本映射。 */
-export type PluginLocalizedText = string | Record<string, string>;
-
-export function pluginText(value: PluginLocalizedText | null | undefined, locale: string): string {
-  if (!value) return "";
-  if (typeof value === "string") return value;
-  if (value[locale]) return value[locale];
-  const language = locale.split("-")[0].toLowerCase();
-  for (const [key, text] of Object.entries(value)) {
-    const normalized = key.toLowerCase();
-    if (normalized === language || normalized.startsWith(`${language}-`)) return text;
-  }
-  return value["en-US"] ?? value["en"] ?? Object.values(value)[0] ?? "";
-}
-
-export interface PluginModelDescriptor {
-  id: string;
-  pluginId: string;
-  pluginName: string;
-  providerId: string;
-  modelId: string;
-  displayName: string;
-  description: string | null;
-  icon: string;
-  providerType: string;
-  maxOutputTokens: number | null;
-  images: boolean;
-  enabled: boolean;
-}
-
-export interface PluginProviderDescriptor {
-  id: string;
-  pluginId: string;
-  displayName: PluginLocalizedText;
-  description: PluginLocalizedText | null;
-  providerType: string;
-  resourceType: string | null;
-  hasModels: boolean;
-  configured: boolean;
-  models: PluginModelDescriptor[];
-}
-
-export interface PluginDescriptor {
-  id: string;
-  name: string;
-  version: string;
-  author: string | null;
-  icon: string;
-  providers: PluginProviderDescriptor[];
-}
-
-export function configuredPluginModels(plugins: PluginDescriptor[]): PluginModelDescriptor[] {
-  return plugins.flatMap((plugin) =>
-    plugin.providers.flatMap((provider) => provider.configured ? provider.models.filter((model) => model.enabled) : []));
-}
-
 export interface OverviewMetrics {
   llm_calls: number;
   successful_calls: number;
@@ -380,7 +324,6 @@ export const api = {
   },
   cursorHarness: () => request<CursorHarnessStatus>("/harness/cursor/status"),
   initializeCursorCa: () => request<CursorHarnessStatus>("/harness/cursor/ca/initialize", { method: "POST" }),
-  plugins: () => request<PluginDescriptor[]>("/plugins"),
   openCursorCaInstallTerminal: async (command: string) => {
     if (!packagedDesktop) throw new Error(t("请在桌面应用中打开终端安装 CA"));
     const { invoke } = await import("@tauri-apps/api/core");

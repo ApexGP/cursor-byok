@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::{
-    plugin::PluginRegistry,
     store::{Store, TabMode, TabSettings},
     Error, Result,
 };
@@ -88,7 +87,6 @@ struct Inner {
     ca_initialization: Mutex<()>,
     backend_addr: RwLock<Option<SocketAddr>>,
     tab_mode: Arc<RwLock<TabMode>>,
-    plugins: RwLock<Option<PluginRegistry>>,
     proxy: Mutex<ProxyRuntime>,
     supervisor_started: AtomicBool,
 }
@@ -102,7 +100,6 @@ impl CursorHarness {
                 ca_initialization: Mutex::new(()),
                 backend_addr: RwLock::new(None),
                 tab_mode: Arc::new(RwLock::new(TabMode::default())),
-                plugins: RwLock::new(None),
                 proxy: Mutex::new(ProxyRuntime::default()),
                 supervisor_started: AtomicBool::new(false),
             }),
@@ -111,13 +108,6 @@ impl CursorHarness {
 
     pub fn set_backend_addr(&self, addr: SocketAddr) {
         *self.inner.backend_addr.write() = Some(addr);
-    }
-
-    /// Lets the harness include plugin-provided models when mirroring the
-    /// catalog into Cursor's state. The control service installs the registry
-    /// once it is available.
-    pub fn set_plugins(&self, plugins: PluginRegistry) {
-        *self.inner.plugins.write() = Some(plugins);
     }
 
     pub async fn proxy_port(&self) -> Option<u16> {
@@ -260,9 +250,8 @@ impl CursorHarness {
         if !self.inner.store.cursor_takeover_enabled().await? {
             return Ok(());
         }
-        let plugins = self.inner.plugins.read().clone();
         let service_url = self.backend_url();
-        model_cache::sync_with(&self.inner.store, plugins.as_ref(), service_url.as_deref()).await?;
+        model_cache::sync_with(&self.inner.store, service_url.as_deref()).await?;
         Ok(())
     }
 

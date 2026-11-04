@@ -13,7 +13,6 @@ use cursor_server::{
     control,
     model::{ModelConfigInput, ModelType, OPENAI_CHAT_ENDPOINT},
     network::NetworkClients,
-    plugin::{PluginRegistry, PluginRuntime},
 };
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -48,17 +47,10 @@ fn model_input() -> ModelConfigInput {
 async fn setup() -> (axum::Router, cursor_server::store::Store, tempfile::TempDir) {
     let (directory, store) = fixtures::temp_store().await;
     store.create_model(&model_input()).await.unwrap();
-    let runtime = PluginRuntime::managed().unwrap();
-    let plugins = PluginRegistry::managed(store.clone(), runtime.clone(), "0.1.0".into()).unwrap();
     let provider = Arc::new(fake_provider::FakeProvider::default());
-    let control = control::ControlService::new(
-        store.clone(),
-        provider,
-        runtime,
-        plugins,
-        NetworkClients::new(store.clone()),
-    )
-    .unwrap();
+    let control =
+        control::ControlService::new(store.clone(), provider, NetworkClients::new(store.clone()))
+            .unwrap();
     (control::api_router(control), store, directory)
 }
 
