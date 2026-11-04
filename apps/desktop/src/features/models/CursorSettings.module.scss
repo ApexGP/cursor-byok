@@ -74,7 +74,7 @@
 
 .modelGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 12px;
 
 }
@@ -238,14 +238,14 @@
 }
 .modelCardActions {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 6px 8px;
 
-  // 空间不足时按钮收缩显示省略号,而不是换行。
+  // 让按钮保持自然宽度；空间不足时整行换行,避免文字被省略号截断。
   > button {
-    min-width: 0;
-    flex: 0 1 auto;
+    max-width: 100%;
+    flex: 0 0 auto;
   }
 }
 .deleteButton:hover {
