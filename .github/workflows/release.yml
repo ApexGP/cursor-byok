@@ -76,8 +76,12 @@ jobs:
             echo "should_publish=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
-          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}" --jq '.id' 2>/dev/null || true)
-          if [[ -z "${release_id}" ]]; then
+          # `gh api` prints a 404 body to stdout, so filter to a numeric id:
+          # otherwise a missing release looks like a valid id and the draft is
+          # never created.
+          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}" \
+            --jq '.id' 2>/dev/null | grep -E '^[0-9]+$' || true)
+          if [[ ! "${release_id}" =~ ^[0-9]+$ ]]; then
             body="Download the installer for your platform from the assets below."
             if [[ "${VERSION}" == *-* ]]; then
               body="Beta release. ${body}"
@@ -88,7 +92,11 @@ jobs:
               -f body="${body}" \
               -F draft=true \
               -F prerelease=false \
-              --jq '.id')
+              --jq '.id' | grep -E '^[0-9]+$' || true)
+          fi
+          if [[ ! "${release_id}" =~ ^[0-9]+$ ]]; then
+            echo "Could not determine or create the draft release for v${VERSION}" >&2
+            exit 1
           fi
           echo "should_publish=true" >> "${GITHUB_OUTPUT}"
           echo "release_id=${release_id}" >> "${GITHUB_OUTPUT}"
