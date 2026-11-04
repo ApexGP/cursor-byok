@@ -17,6 +17,7 @@ jobs:
     name: Prepare release
     runs-on: ubuntu-latest
     outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
       should_publish: ${{ steps.release.outputs.should_publish }}
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -62,7 +63,7 @@ jobs:
           fi
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
-      - name: Check whether this version is already published
+      - name: Ensure draft release
         id: release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -73,9 +74,24 @@ jobs:
           if [[ "${state}" = "published" ]]; then
             echo "Version ${VERSION} is already published; nothing to do."
             echo "should_publish=false" >> "${GITHUB_OUTPUT}"
-          else
-            echo "should_publish=true" >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
+          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}" --jq '.id' 2>/dev/null || true)
+          if [[ -z "${release_id}" ]]; then
+            body="Download the installer for your platform from the assets below."
+            if [[ "${VERSION}" == *-* ]]; then
+              body="Beta release. ${body}"
+            fi
+            release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
+              -f tag_name="v${VERSION}" \
+              -f name="Cursor BYOK v${VERSION}" \
+              -f body="${body}" \
+              -F draft=true \
+              -F prerelease=false \
+              --jq '.id')
+          fi
+          echo "should_publish=true" >> "${GITHUB_OUTPUT}"
+          echo "release_id=${release_id}" >> "${GITHUB_OUTPUT}"
 
   publish:
     name: Publish (${{ matrix.platform }})
@@ -141,11 +157,11 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ contains(matrix.platform, 'macos') && '-' || '' }}
         with:
           projectPath: apps/desktop
+          # The prepare job creates one draft release up front. Passing its id
+          # to every matrix job avoids concurrent "create draft" races.
+          releaseId: ${{ needs.prepare.outputs.release_id }}
           tagName: v__VERSION__
-          releaseName: Cursor BYOK v__VERSION__
-          releaseBody: ${{ contains(needs.prepare.outputs.version, '-') && 'Beta release. Download the installer for your platform from the assets below.' || 'Download the installer for your platform from the assets below.' }}
           releaseDraft: true
-          prerelease: false
           uploadUpdaterJson: true
           args: ${{ matrix.args }}
 
