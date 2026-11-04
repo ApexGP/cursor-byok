@@ -316,7 +316,6 @@ impl CursorHarness {
             self.inner.store.set_cursor_takeover_enabled(true).await?;
             self.enable().await?;
             self.ensure_supervisor();
-            self.sync_model_cache().await?;
             if let Err(error) = self.restart_cursor().await {
                 tracing::warn!(%error, "failed to restart Cursor with the local backend");
             }
@@ -337,7 +336,13 @@ impl CursorHarness {
         let service_url = self
             .backend_url()
             .ok_or_else(|| Error::Config("desktop management server is not ready".into()))?;
-        process::restart_cursor_with_backend(&service_url).await
+        // Cursor must be stopped before patching applicationUser; otherwise its
+        // in-memory state overwrites the sync and resets model visibility.
+        process::stop_cursor().await?;
+        if let Err(error) = self.sync_model_cache().await {
+            tracing::warn!(%error, "failed to sync Cursor model cache before restart");
+        }
+        process::launch_cursor_with_backend(&service_url).await
     }
 
     /// Refreshes Cursor after a BYOK restart when either the proxy port changed
@@ -370,7 +375,11 @@ impl CursorHarness {
                 molten_ok,
                 "restarting Cursor to apply local backend settings"
             );
-            process::restart_cursor_with_backend(&service_url).await?;
+            process::stop_cursor().await?;
+            if let Err(error) = self.sync_model_cache().await {
+                tracing::warn!(%error, "failed to sync Cursor model cache before restart");
+            }
+            process::launch_cursor_with_backend(&service_url).await?;
             return Ok(());
         }
         match current {

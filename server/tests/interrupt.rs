@@ -291,6 +291,7 @@ async fn client_heartbeat_returns_a_server_protocol_heartbeat() {
             request_id: "heartbeat-run".into(),
             // A transport heartbeat must not wait for missing application messages.
             seqno: 1,
+            payload_len: 0,
             message: pb::AgentClientMessage {
                 message: Some(pb::agent_client_message::Message::ClientHeartbeat(
                     pb::ClientHeartbeat {},
@@ -461,6 +462,7 @@ async fn queued_user_message_after_turn_ended_starts_the_next_turn() {
         cursor_server::api::cursor::bidi::DecodedAppend {
             request_id: "queued-after-turn".into(),
             seqno: append_seqno,
+            payload_len: 0,
             message: runtime_user_message(),
         },
         None,

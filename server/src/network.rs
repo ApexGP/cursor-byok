@@ -21,6 +21,14 @@ const LOCAL_NO_PROXY: &str = "localhost,127.0.0.0/8,::1";
 /// freezes it into the connector, so a running process never notices when a
 /// system-wide proxy is toggled (e.g. Clash on/off or a port change).
 const FINGERPRINT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+/// A dead local proxy or upstream node should fail quickly so Cursor can retry
+/// instead of showing a reconnecting state for the OS-level TCP timeout.
+const OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Detect half-open proxy connections after sleep/wake before the next RPC.
+const OUTBOUND_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+/// Drop stale pooled connections sooner; a long-lived pool otherwise reuses a
+/// connection the local proxy closed while the machine was suspended.
+const OUTBOUND_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct NetworkClients {
@@ -233,7 +241,11 @@ pub async fn client_builder(store: &Store) -> Result<reqwest::ClientBuilder> {
     let settings = store.proxy_settings_secret().await?;
     // Use the platform TLS stack for compatibility with provider gateways that
     // only offer legacy TLS 1.2 cipher suites unsupported by rustls.
-    let mut builder = reqwest::Client::builder().use_native_tls();
+    let mut builder = reqwest::Client::builder()
+        .use_native_tls()
+        .connect_timeout(OUTBOUND_CONNECT_TIMEOUT)
+        .tcp_keepalive(OUTBOUND_TCP_KEEPALIVE)
+        .pool_idle_timeout(OUTBOUND_POOL_IDLE_TIMEOUT);
     if settings.mode.is_custom() {
         builder = builder.proxy(custom_proxy(&settings)?);
     }
@@ -246,7 +258,11 @@ pub async fn client(store: &Store) -> Result<reqwest::Client> {
 
 pub async fn blocking_client_builder(store: &Store) -> Result<reqwest::blocking::ClientBuilder> {
     let settings = store.proxy_settings_secret().await?;
-    let mut builder = reqwest::blocking::Client::builder().use_native_tls();
+    let mut builder = reqwest::blocking::Client::builder()
+        .use_native_tls()
+        .connect_timeout(OUTBOUND_CONNECT_TIMEOUT)
+        .tcp_keepalive(OUTBOUND_TCP_KEEPALIVE)
+        .pool_idle_timeout(OUTBOUND_POOL_IDLE_TIMEOUT);
     if settings.mode.is_custom() {
         builder = builder.proxy(custom_proxy(&settings)?);
     }

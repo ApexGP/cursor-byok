@@ -16,10 +16,25 @@ use crate::{
 pub struct DecodedAppend {
     pub request_id: String,
     pub seqno: i64,
+    pub payload_len: usize,
     pub message: agent::AgentClientMessage,
 }
 
 impl DecodedAppend {
+    pub fn summary_len(&self) -> Option<usize> {
+        let agent::agent_client_message::Message::RunRequest(request) =
+            self.message.message.as_ref()?
+        else {
+            return None;
+        };
+        request
+            .conversation_state
+            .as_ref()?
+            .summary
+            .as_ref()
+            .map(Vec::len)
+    }
+
     pub fn model_id(&self) -> Option<&str> {
         let agent::agent_client_message::Message::RunRequest(request) =
             self.message.message.as_ref()?
@@ -109,7 +124,9 @@ impl DecodedAppend {
             "conversation_history_images": history_images,
             "root_message_count": state.map_or(0, |state| state.root_prompt_messages_json.len()),
             "turn_count": state.map_or(0, |state| state.turns.len()),
+            "summary_bytes": state.and_then(|state| state.summary.as_ref().map(Vec::len)),
             "prefetched_blob_count": request.pre_fetched_blobs.len(),
+            "payload_bytes": self.payload_len,
         })
     }
 }
@@ -172,11 +189,70 @@ pub fn decode(request: &ai::BidiAppendRequest) -> Result<DecodedAppend> {
     }
     let payload = hex::decode(&request.data)
         .map_err(|error| Error::Protocol(format!("invalid BidiAppend hex: {error}")))?;
+    let message = match agent::AgentClientMessage::decode(payload.as_slice()) {
+        Ok(message) => message,
+        Err(error) => {
+            match capture_decode_failure(request_id, request.append_seqno, &payload) {
+                Ok(path) => tracing::warn!(
+                    request_id,
+                    seqno = request.append_seqno,
+                    bytes = payload.len(),
+                    path = %path.display(),
+                    %error,
+                    "BidiAppend decode failed; saved raw payload"
+                ),
+                Err(capture_error) => tracing::warn!(
+                    request_id,
+                    seqno = request.append_seqno,
+                    bytes = payload.len(),
+                    %capture_error,
+                    %error,
+                    "BidiAppend decode failed; could not save raw payload"
+                ),
+            }
+            return Err(Error::Protocol(format!(
+                "decoding AgentClientMessage: {error}"
+            )));
+        }
+    };
     Ok(DecodedAppend {
         request_id: request_id.into(),
         seqno: request.append_seqno,
-        message: agent::AgentClientMessage::decode(payload.as_slice())?,
+        payload_len: payload.len(),
+        message,
     })
+}
+
+fn capture_decode_failure(
+    request_id: &str,
+    seqno: i64,
+    payload: &[u8],
+) -> std::io::Result<std::path::PathBuf> {
+    const MAX_CAPTURED_BYTES: usize = 8 * 1024 * 1024;
+    if payload.len() > MAX_CAPTURED_BYTES {
+        return Err(std::io::Error::other("payload exceeds capture limit"));
+    }
+    let directory = crate::config::managed_data_dir()
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+        .join("logs")
+        .join("bidi-decode-failures");
+    std::fs::create_dir_all(&directory)?;
+    let safe_request_id = request_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let path = directory.join(format!(
+        "{}-{safe_request_id}-seq{seqno}.bin",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
+    ));
+    std::fs::write(&path, payload)?;
+    Ok(path)
 }
 
 pub async fn append(

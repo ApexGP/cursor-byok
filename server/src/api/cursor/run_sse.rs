@@ -17,11 +17,15 @@ use crate::{
     Result,
 };
 
-const RUN_DISCONNECT_GRACE: Duration = Duration::from_secs(15);
+// Keep a run alive long enough for Cursor to reconnect after a transient
+// local-proxy or network stall. The observed upstream stalls in this setup
+// reached 30-50s; a shorter grace cancelled the run before the client returned.
+const RUN_DISCONNECT_GRACE: Duration = Duration::from_secs(30);
 
 pub async fn stream(registry: &TransportRegistry, request_id: &str) -> Result<Response<Body>> {
     let handle = registry.get_or_create(request_id).await?;
     let receiver = handle.subscribe();
+    tracing::info!(request_id, "RunSSE subscriber attached");
     let trace = handle.trace().cloned();
     if let Some(trace) = &trace {
         trace.response_started(StatusCode::OK.as_u16());
@@ -54,6 +58,10 @@ fn local_body_stream(
             let terminal = is_end_stream_frame(&chunk);
             trace.chunk(&chunk);
             if terminal {
+                tracing::info!(
+                    request_id = guard.request_id(),
+                    "RunSSE stream completed"
+                );
                 guard.complete();
                 trace.finish(end_stream_error(&chunk));
             }
@@ -134,6 +142,10 @@ impl LocalRunGuard {
             .expect("receiver is present until the guard is dropped")
     }
 
+    fn request_id(&self) -> &str {
+        self.handle.request_id()
+    }
+
     fn complete(&mut self) {
         self.completed = true;
     }
@@ -146,6 +158,11 @@ impl Drop for LocalRunGuard {
         // true forever and suppress the grace timer.
         drop(self.receiver.take());
         if !self.completed {
+            tracing::warn!(
+                request_id = self.handle.request_id(),
+                grace_ms = self.grace.as_millis(),
+                "RunSSE subscriber disconnected; scheduling grace disconnect"
+            );
             self.handle.schedule_disconnect(self.grace);
         }
     }

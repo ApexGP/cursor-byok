@@ -65,6 +65,10 @@ pub async fn forward(
     forward_request(&proxy, request, None).await
 }
 
+/// Upper bound for buffered control-plane calls. A stalled upstream must not
+/// leave Cursor waiting indefinitely for model metadata or account state.
+const BUFFERED_UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub(crate) async fn forward_to_service(
     proxy: &CursorProxy,
     request: Request<Body>,
@@ -110,7 +114,7 @@ async fn forward_request(
                 method = %parts.method,
                 path,
                 elapsed_ms = started.elapsed().as_millis(),
-                %error,
+                error = %error_chain(&error),
                 "Cursor upstream request failed"
             );
             return Err(error.into());
@@ -159,14 +163,43 @@ pub async fn forward_buffered(
     let body = to_bytes(body, usize::MAX)
         .await
         .map_err(|error| crate::Error::Protocol(format!("cannot read request body: {error}")))?;
-    let upstream = proxy
-        .client()
-        .await?
-        .request(parts.method, url)
-        .headers(headers)
-        .body(body)
-        .send()
-        .await?;
+    let started = Instant::now();
+    let client = proxy.client().await?;
+    let method = parts.method;
+    let mut attempt = 0;
+    let upstream = loop {
+        attempt += 1;
+        match client
+            .request(method.clone(), url.clone())
+            .headers(headers.clone())
+            .timeout(BUFFERED_UPSTREAM_TIMEOUT)
+            .body(body.clone())
+            .send()
+            .await
+        {
+            Ok(response) => break response,
+            // A connect failure means the request never reached upstream, so
+            // retrying a buffered control call cannot duplicate side effects.
+            Err(error) if attempt == 1 && error.is_connect() => {
+                tracing::warn!(
+                    path,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    error = %error_chain(&error),
+                    "retrying buffered Cursor upstream request after connect failure"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            Err(error) => {
+                tracing::error!(
+                    path,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    error = %error_chain(&error),
+                    "buffered Cursor upstream request failed"
+                );
+                return Err(error.into());
+            }
+        }
+    };
     let status = upstream.status();
     let mut headers = upstream.headers().clone();
     remove_hop_by_hop_headers(&mut headers);
@@ -176,6 +209,19 @@ pub async fn forward_buffered(
         headers,
         body,
     })
+}
+
+/// reqwest's Display only says "error sending request"; include the source
+/// chain so the log distinguishes a dead local proxy from an upstream reset.
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
 }
 
 fn upstream_url(headers: &axum::http::HeaderMap, fallback: &str, path: &str) -> Result<String> {

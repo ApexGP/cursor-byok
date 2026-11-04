@@ -208,7 +208,10 @@ async fn run_sse_handler(
     let (parts, body) = buffered(request).await?;
     let request: agent::BidiRequestId = connect::decode_unary(&body)?;
     let route = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        // Cursor opens RunSSE and BidiAppend as separate requests. Under a
+        // transient local stall the append can arrive well after 30s; waiting
+        // longer avoids a spurious error and a client reconnect loop.
+        std::time::Duration::from_secs(60),
         registry.wait_route(&request.request_id),
     )
     .await
@@ -257,6 +260,18 @@ async fn bidi_handler(
     let decoded = bidi::decode(&request)?;
     let first_model = decoded.model_id().map(str::to_owned);
     let conversation_id = decoded.conversation_id().map(str::to_owned);
+    let summary_len = decoded.summary_len();
+    if let Some(model_id) = first_model.as_deref() {
+        tracing::info!(
+            request_id = decoded.request_id,
+            conversation_id = conversation_id.as_deref(),
+            model_id,
+            payload_bytes = decoded.payload_len,
+            summary_bytes = summary_len.unwrap_or(0),
+            has_summary = summary_len.is_some(),
+            "decoded Cursor run request"
+        );
+    }
     let trace_metadata = decoded.trace_metadata();
     let trace = registry.trace(&decoded.request_id);
     let local = if let Some(model_id) = decoded.model_id() {

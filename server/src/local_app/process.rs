@@ -34,9 +34,15 @@ pub async fn terminate_cursor() -> Result<()> {
 /// HTTP/2 disabled it selects `cursorCreds.backendUrl` for Run/Bidi. The launch
 /// flag is Cursor's supported override; it keeps the official account and
 /// authentication flow intact.
-pub async fn restart_cursor_with_backend(backend_url: &str) -> Result<()> {
+/// Stops Cursor and waits until its process is gone. Callers that need to
+/// patch Cursor's persisted state must use this so Cursor cannot overwrite the
+/// write from its in-memory applicationUser snapshot.
+pub async fn stop_cursor() -> Result<()> {
     terminate_cursor().await?;
-    wait_for_cursor_exit(CURSOR_EXIT_TIMEOUT).await?;
+    wait_for_cursor_exit(CURSOR_EXIT_TIMEOUT).await
+}
+
+pub async fn launch_cursor_with_backend(backend_url: &str) -> Result<()> {
     launch_platform_cursor(backend_url).await
 }
 

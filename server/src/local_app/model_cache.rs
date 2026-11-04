@@ -2,10 +2,12 @@
 //!
 //! Cursor's agent-host module refreshes the catalog directly from the official
 //! backend, bypassing the local MITM proxy. That refresh overwrites
-//! `availableDefaultModels2` with the official-only list. We merge local models
-//! back into Cursor's persisted state and add their IDs to
-//! `aiSettings.modelOverrideEnabled`; the model picker re-adds override IDs even
-//! when the base catalog no longer contains them.
+//! `availableDefaultModels2` with the official-only list, so we merge local
+//! models back into the persisted catalog. User visibility choices
+//! (`aiSettings.modelOverrideEnabled` / `modelOverrideDisabled`) are owned by
+//! Cursor and are never rewritten. Cursor keeps `applicationUser` in memory, so
+//! the sync only runs while Cursor is stopped; restart paths stop Cursor, sync,
+//! then launch it again.
 
 use std::{
     path::{Path, PathBuf},
@@ -30,7 +32,6 @@ const APP_USER_KEY: &str =
 const CURSOR_SERVER_CONFIG_KEY: &str = "cursorai/serverConfig";
 const STATSIG_BOOTSTRAP_KEY: &str = "workbench.experiments.statsigBootstrap";
 const SYNCED_IDS_KEY: &str = "cursorByokModelIds";
-const HIDDEN_IDS_KEY: &str = "cursorByokHiddenModelIds";
 const BACKUP_EXTENSION: &str = "vscdb.cursor-byok.bak";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const AGENT_HOST_GATE: &str = "cursor_agent_host";
@@ -48,6 +49,15 @@ pub async fn sync_with(
     service_url: Option<&str>,
 ) -> Result<CursorCatalogSync> {
     let _guard = SYNC_LOCK.lock().await;
+    if super::process::cursor_running().await? {
+        // Cursor keeps applicationUser in memory and periodically flushes it.
+        // Writing while it runs loses the race and lets Cursor overwrite user
+        // model visibility choices; restart_cursor stops it before syncing.
+        tracing::info!(
+            "Cursor is running; skipping applicationUser state sync to preserve model preferences"
+        );
+        return Ok(CursorCatalogSync::default());
+    }
     let path = account::state_db_path()?;
     if !path.exists() {
         return Ok(CursorCatalogSync::default());
@@ -95,6 +105,7 @@ pub(crate) async fn sync_at_with_service(
     let text: String = row.try_get("value")?;
     let mut root: Value = serde_json::from_str(&text)
         .map_err(|error| Error::Config(format!("parse Cursor applicationUser state: {error}")))?;
+    let original = root.clone();
     let root_object = root
         .as_object_mut()
         .ok_or_else(|| Error::Config("Cursor applicationUser state is not an object".into()))?;
@@ -116,27 +127,12 @@ pub(crate) async fn sync_at_with_service(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let mut hidden_ids = root_object
-        .get(HIDDEN_IDS_KEY)
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
     // Only clean up entries for models that disappeared from the configuration.
-    // A local model the user explicitly turned off must stay in
-    // `modelOverrideDisabled`; otherwise every sync (startup, model edit, plugin
-    // change) silently re-enables it in Cursor's picker.
     let stale_ids = previous_ids
         .iter()
         .filter(|id| !new_ids.iter().any(|new_id| new_id == *id))
         .cloned()
         .collect::<Vec<_>>();
-    hidden_ids.retain(|id| !stale_ids.contains(id));
 
     merge_catalog(
         root_object
@@ -146,79 +142,44 @@ pub(crate) async fn sync_at_with_service(
         &new_ids,
         entries,
     )?;
-    let catalog_ids = root_object
-        .get("availableDefaultModels2")
-        .and_then(Value::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| entry.get("name").and_then(Value::as_str))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
     let settings = root_object.entry("aiSettings").or_insert_with(|| json!({}));
     let settings = settings
         .as_object_mut()
         .ok_or_else(|| Error::Config("Cursor aiSettings is not an object".into()))?;
-    remove_ids(settings, "modelOverrideEnabled", &stale_ids);
     // `userAddedModels` makes Cursor synthesize a second, minimal
-    // `isUserAdded=true` catalog row. Keep only our full `availableDefaultModels2`
-    // entry and the visibility override, and clean up IDs written by older builds.
+    // `isUserAdded=true` catalog row. Clean up only IDs written by older builds.
+    // `modelOverrideEnabled` / `modelOverrideDisabled` are the user's choices;
+    // never rewrite them here, or a concurrent Cursor flush loses the selection.
     remove_ids(settings, "userAddedModels", &stale_ids);
     remove_ids(settings, "userAddedModels", &new_ids);
-    remove_ids(settings, "modelOverrideDisabled", &stale_ids);
-
-    // Cursor prunes `modelOverrideDisabled` entries missing from a catalog
-    // refresh, which silently turns them back on. Keep our own mirror of
-    // explicitly hidden IDs and restore those that disappeared. An ID that
-    // Cursor explicitly enabled (`modelOverrideEnabled` without a matching
-    // disabled entry) clears the mirror, so re-enabling still works.
-    let current_enabled = ids(settings, "modelOverrideEnabled");
-    let mut current_disabled = ids(settings, "modelOverrideDisabled");
-    hidden_ids.retain(|id| current_disabled.contains(id) || !current_enabled.contains(id));
-    for id in &current_disabled {
-        if !hidden_ids.contains(id) {
-            hidden_ids.push(id.clone());
-        }
-    }
-    for id in &hidden_ids {
-        if catalog_ids.iter().any(|catalog| catalog == id) && !current_disabled.contains(id) {
-            current_disabled.push(id.clone());
-        }
-    }
-    settings.insert(
-        "modelOverrideDisabled".into(),
-        string_array(&current_disabled),
-    );
-
-    let mut enabled_ids = Vec::new();
-    for id in &new_ids {
-        if current_disabled.iter().any(|disabled| disabled == id) {
-            // Cursor checks `modelOverrideEnabled` before
-            // `modelOverrideDisabled`, so a stale enable entry would override
-            // the user's explicit choice.
-            remove_ids(settings, "modelOverrideEnabled", std::slice::from_ref(id));
-        } else {
-            enabled_ids.push(id.clone());
-        }
-    }
-    add_ids(settings, "modelOverrideEnabled", &enabled_ids);
     if let Some(service_url) = service_url {
         patch_cursor_creds(root_object, service_url);
     }
-    root_object.insert(SYNCED_IDS_KEY.into(), string_array(&new_ids));
-    root_object.insert(HIDDEN_IDS_KEY.into(), string_array(&hidden_ids));
+    if previous_ids != new_ids {
+        root_object.insert(SYNCED_IDS_KEY.into(), string_array(&new_ids));
+    }
 
-    let updated = serde_json::to_string(&root)?;
-    backup(path)?;
-    let mut transaction = connection.begin().await?;
-    sqlx::query("INSERT OR REPLACE INTO ItemTable(key, value) VALUES(?, ?)")
-        .bind(APP_USER_KEY)
-        .bind(updated)
-        .execute(&mut *transaction)
-        .await?;
-    transaction.commit().await?;
+    if root == original {
+        tracing::info!(
+            model_count = new_ids.len(),
+            "Cursor state cache already in sync; skipping write"
+        );
+    } else {
+        let updated = serde_json::to_string(&root)?;
+        backup(path)?;
+        let mut transaction = connection.begin().await?;
+        sqlx::query("INSERT OR REPLACE INTO ItemTable(key, value) VALUES(?, ?)")
+            .bind(APP_USER_KEY)
+            .bind(updated)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        tracing::info!(
+            model_count = new_ids.len(),
+            previous_count = previous_ids.len(),
+            "synced local models into Cursor state cache"
+        );
+    }
     if let Err(error) = patch_statsig_bootstrap(path).await {
         tracing::warn!(%error, "failed to patch Cursor Statsig cache");
     }
@@ -227,11 +188,6 @@ pub(crate) async fn sync_at_with_service(
             tracing::warn!(%error, "failed to patch Cursor server-config cache");
         }
     }
-    tracing::info!(
-        model_count = new_ids.len(),
-        previous_count = previous_ids.len(),
-        "synced local models into Cursor state cache"
-    );
     Ok(CursorCatalogSync {
         model_ids: new_ids,
         previous_ids,
@@ -402,36 +358,11 @@ fn patch_cursor_creds(root: &mut Map<String, Value>, service_url: &str) {
     else {
         return;
     };
+    if creds.get("backendUrl").and_then(Value::as_str) == Some(service_url) {
+        return;
+    }
     creds.insert("backendUrl".into(), service_url.into());
     tracing::info!(service_url, "pinned Cursor backendUrl to the local service");
-}
-
-fn ids(settings: &Map<String, Value>, key: &str) -> Vec<String> {
-    settings
-        .get(key)
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn add_ids(settings: &mut Map<String, Value>, key: &str, ids: &[String]) {
-    let values = settings
-        .entry(key)
-        .or_insert_with(|| Value::Array(Vec::new()));
-    let Some(values) = values.as_array_mut() else {
-        return;
-    };
-    for id in ids {
-        if !values.iter().any(|value| value.as_str() == Some(id)) {
-            values.push(Value::String(id.clone()));
-        }
-    }
 }
 
 fn remove_ids(settings: &mut Map<String, Value>, key: &str, ids: &[String]) {
@@ -521,16 +452,18 @@ mod tests {
     }
 
     async fn read(path: &Path) -> Value {
+        serde_json::from_str(&read_raw(path).await).unwrap()
+    }
+
+    async fn read_raw(path: &Path) -> String {
         let mut connection = SqliteConnection::connect(&format!("sqlite:{}", path.display()))
             .await
             .unwrap();
-        let value: String =
-            sqlx::query_scalar("SELECT CAST(value AS TEXT) FROM ItemTable WHERE key = ?")
-                .bind(APP_USER_KEY)
-                .fetch_one(&mut connection)
-                .await
-                .unwrap();
-        serde_json::from_str(&value).unwrap()
+        sqlx::query_scalar("SELECT CAST(value AS TEXT) FROM ItemTable WHERE key = ?")
+            .bind(APP_USER_KEY)
+            .fetch_one(&mut connection)
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -575,23 +508,19 @@ mod tests {
         assert!(!local["variants"].as_array().unwrap().is_empty());
 
         let settings = &state["aiSettings"];
-        assert!(settings["modelOverrideEnabled"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "local-model"));
-        assert!(!settings["modelOverrideDisabled"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "local-model" || value == "stale"));
+        // Visibility is Cursor-owned: the sync must not add, remove, or reorder
+        // these entries, even for local/plugin models.
+        assert_eq!(
+            settings["modelOverrideEnabled"],
+            json!(["official", "stale"])
+        );
+        assert_eq!(settings["modelOverrideDisabled"], json!(["stale"]));
         assert!(!settings["userAddedModels"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|value| value == "local-model"));
+            .any(|value| value == "local-model" || value == "stale"));
         assert_eq!(state[SYNCED_IDS_KEY], json!(["local-model"]));
-        assert_eq!(state[HIDDEN_IDS_KEY], json!([]));
         assert!(path.with_extension(BACKUP_EXTENSION).exists());
     }
 
@@ -618,107 +547,41 @@ mod tests {
 
         let state = read(&path).await;
         let settings = &state["aiSettings"];
-        assert!(settings["modelOverrideDisabled"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "local-model"));
-        assert!(!settings["modelOverrideEnabled"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "local-model"));
+        assert_eq!(settings["modelOverrideEnabled"], json!(["local-model"]));
+        assert_eq!(settings["modelOverrideDisabled"], json!(["local-model"]));
         assert!(state["availableDefaultModels2"]
             .as_array()
             .unwrap()
             .iter()
             .any(|entry| entry["name"] == "local-model"));
-        assert_eq!(state[HIDDEN_IDS_KEY], json!(["local-model"]));
     }
 
     #[tokio::test]
-    async fn restores_hidden_models_after_a_catalog_refresh_prunes_them() {
+    async fn skips_the_write_when_the_state_is_already_current() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.vscdb");
+        let entry = crate::cursor::services::model_catalog::cursor_catalog_entries(&[model()], &[])
+            .into_iter()
+            .next()
+            .expect("catalog entry");
         seed(
             &path,
             json!({
-                "availableDefaultModels2": [
-                    {"name": "official-hidden", "clientDisplayName": "Official"},
-                ],
+                "availableDefaultModels2": [entry],
                 "aiSettings": {
                     "modelOverrideEnabled": [],
-                    "modelOverrideDisabled": [],
+                    "modelOverrideDisabled": ["official-hidden"],
                 },
-                "cursorByokHiddenModelIds": ["official-hidden"],
+                "cursorByokModelIds": ["local-model"],
             }),
         )
         .await;
+        let before = read_raw(&path).await;
 
-        sync_at(&path, &[], &[]).await.unwrap();
+        sync_at(&path, &[model()], &[]).await.unwrap();
 
-        let state = read(&path).await;
-        assert_eq!(
-            state["aiSettings"]["modelOverrideDisabled"],
-            json!(["official-hidden"])
-        );
-        assert_eq!(state[HIDDEN_IDS_KEY], json!(["official-hidden"]));
-    }
-
-    #[tokio::test]
-    async fn keeps_hidden_entries_for_models_that_left_the_catalog() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.vscdb");
-        seed(
-            &path,
-            json!({
-                "availableDefaultModels2": [],
-                "aiSettings": {
-                    "modelOverrideEnabled": [],
-                    "modelOverrideDisabled": [],
-                },
-                "cursorByokHiddenModelIds": ["retired-model"],
-            }),
-        )
-        .await;
-
-        sync_at(&path, &[], &[]).await.unwrap();
-
-        let state = read(&path).await;
-        assert!(state["aiSettings"]["modelOverrideDisabled"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-        assert_eq!(state[HIDDEN_IDS_KEY], json!(["retired-model"]));
-    }
-
-    #[tokio::test]
-    async fn clears_the_hidden_mirror_when_the_user_re_enables_a_model() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.vscdb");
-        seed(
-            &path,
-            json!({
-                "availableDefaultModels2": [
-                    {"name": "official-hidden", "clientDisplayName": "Official"},
-                ],
-                "aiSettings": {
-                    "modelOverrideEnabled": ["official-hidden"],
-                    "modelOverrideDisabled": [],
-                },
-                "cursorByokHiddenModelIds": ["official-hidden"],
-            }),
-        )
-        .await;
-
-        sync_at(&path, &[], &[]).await.unwrap();
-
-        let state = read(&path).await;
-        assert!(state["aiSettings"]["modelOverrideDisabled"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-        assert_eq!(state[HIDDEN_IDS_KEY], json!([]));
+        assert_eq!(read_raw(&path).await, before);
+        assert!(!path.with_extension(BACKUP_EXTENSION).exists());
     }
 
     #[tokio::test]
