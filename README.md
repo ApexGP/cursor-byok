@@ -6,8 +6,6 @@
 
 cursor-byok is an open-source local model gateway for Cursor. It connects Cursor to the OpenAI- and Anthropic-compatible services you configure, while keeping tool calling, Skills, MCP, and multi-turn Agent workflows available.
 
-This repository is independently maintained at `ApexGP/cursor-byok` (no longer part of a GitHub fork network). Releases and automatic updates are published from this repository.
-
 [简体中文](./README-CN.md) · [User Guide](https://docs.leokun.cn) · [Download](https://github.com/ApexGP/cursor-byok/releases/latest) · [Report an Issue](https://github.com/ApexGP/cursor-byok/issues)
 
 [![Release](https://img.shields.io/github/v/release/ApexGP/cursor-byok?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases/latest)
@@ -16,6 +14,12 @@ This repository is independently maintained at `ApexGP/cursor-byok` (no longer p
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases/latest)
 
 </div>
+
+> [!NOTE]
+>
+> The upstream project [leookun/cursor-byok](https://github.com/leookun/cursor-byok) is archived. This repository is continuously maintained by [ApexGP](https://github.com/ApexGP) and is no longer part of the original GitHub fork network. The maintainer is continuing to investigate and fix [issues](https://github.com/leookun/cursor-byok/issues) inherited from upstream and to evaluate [pull requests](https://github.com/leookun/cursor-byok/pulls) that were not merged upstream. Use this repository for downloads, automatic updates, issue reports, and contributions.
+>
+> Thanks to the [original author](https://github.com/leookun) and [all contributors](https://github.com/leookun/cursor-byok/graphs/contributors).
 
 ![Connect cursor-byok to a wide range of model APIs](./images/en-brand-1.png)
 
@@ -150,7 +154,6 @@ cursor-byok/
 │   ├── cursor-protocol-extractor/ # protocol extraction and Go codegen
 │   ├── cursor-capture/            # protocol capture and debugging
 │   └── benchmarks/                # code search and indexing benchmarks
-├── images/            # README images
 ├── Cargo.toml         # Rust workspace configuration
 └── Makefile           # common development, check, and build commands
 ```

@@ -6,8 +6,6 @@
 
 cursor-byok 是一个开源的本机 Cursor 模型网关。它把 Cursor 的 Agent 请求转发到你配置的 OpenAI / Anthropic 兼容服务，并尽可能保留工具调用、Skills、MCP 和多轮对话能力。
 
-本仓库由 `ApexGP/cursor-byok` 独立维护（已脱离 GitHub fork 网络），发布与自动更新均以本仓库为准。
-
 [English](./README.md) · [使用指南](https://docs.leokun.cn) · [下载](https://github.com/ApexGP/cursor-byok/releases/latest) · [提交问题](https://github.com/ApexGP/cursor-byok/issues)
 
 [![Release](https://img.shields.io/github/v/release/ApexGP/cursor-byok?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases/latest)
@@ -16,6 +14,12 @@ cursor-byok 是一个开源的本机 Cursor 模型网关。它把 Cursor 的 Age
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases/latest)
 
 </div>
+
+> [!NOTE]
+>
+> 原项目 [leookun/cursor-byok](https://github.com/leookun/cursor-byok) 已归档。本仓库由 [ApexGP](https://github.com/ApexGP) 持续维护，已脱离原 GitHub fork 网络。作者正在继续排查和修复上游遗留的 [Issue](https://github.com/leookun/cursor-byok/issues)、评估尚未合入上游的 [PR](https://github.com/leookun/cursor-byok/pulls)。下载、自动更新、问题反馈与贡献请使用本仓库的入口。
+>
+> 感谢[原作者](https://github.com/leookun)与[所有贡献者](https://github.com/leookun/cursor-byok/graphs/contributors)。
 
 ![将 cursor-byok 连接到多种模型 API](./images/en-brand-1.png)
 
@@ -150,7 +154,6 @@ cursor-byok/
 │   ├── cursor-protocol-extractor/ # 协议提取与 Go 代码生成
 │   ├── cursor-capture/            # 协议抓取与调试
 │   └── benchmarks/                # 代码搜索与索引基准
-├── images/            # README 展示图片
 ├── Cargo.toml         # Rust 工作区配置
 └── Makefile           # 常用开发、检查和构建命令
 ```
