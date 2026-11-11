@@ -1,11 +1,13 @@
 //! Reads a time-windowed, redacted tail of the daily application log files.
 
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Utc};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 
 use crate::diagnostics::redact::Redactor;
 
@@ -15,6 +17,10 @@ const LOG_FILE_SUFFIX: &str = "log";
 const FILE_DATE_FORMAT: &str = "%Y-%m-%d";
 /// The design caps the log tail at 200 lines before the byte budget is applied.
 const MAX_LOG_LINES: usize = 200;
+/// Hard cap for a single line held while streaming; longer lines keep their tail.
+const MAX_LINE_BYTES: usize = 64 * 1024;
+/// Bytes read from the start of a line so timestamps survive tail trimming.
+const TIMESTAMP_PROBE_BYTES: usize = 64;
 
 /// Redacted log lines for the capture window.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -27,9 +33,15 @@ pub struct LogTail {
 /// Collects log lines around `captured_at`.
 ///
 /// Reads only the daily files for the capture day and, when the window crosses
-/// midnight, the previous day. Missing directories and files are not errors.
-/// Lines whose leading timestamp cannot be parsed are kept because they are
-/// likely continuation lines of a nearby event.
+/// midnight, the previous day. Files are streamed line by line; retained output
+/// never exceeds `max_bytes`, so memory stays proportional to the budget rather
+/// than to the log file size. Missing directories and files are not errors.
+///
+/// Timestamped lines are filtered to the window. Lines whose leading timestamp
+/// cannot be parsed are treated as continuations of the preceding timestamped
+/// block, so a multi-line event is kept or dropped as a whole. When a file has
+/// no parseable timestamp at all, only its final [`MAX_LOG_LINES`] lines are
+/// retained; the result is marked truncated when lines are dropped.
 pub async fn collect_log_tail(
     log_dir: &Path,
     captured_at: DateTime<Utc>,
@@ -58,26 +70,146 @@ pub async fn collect_log_tail(
     }
     dates.push(capture_date);
 
-    let mut lines = Vec::new();
+    let redactor = Redactor::new();
+    let mut retained = BoundedLines::new(MAX_LOG_LINES, max_bytes);
     for date in dates {
         let path = log_file_path(log_dir, date);
-        match tokio::fs::read(&path).await {
-            Ok(bytes) => {
-                let text = String::from_utf8_lossy(&bytes);
-                filter_window_lines(text.lines(), start, end, &mut lines);
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return error_tail(&path, &error),
+        };
+
+        let mut reader = BufReader::new(file);
+        let mut line = Vec::new();
+        let mut probe = Vec::new();
+        let mut has_timestamp = false;
+        let mut keep_block = false;
+        // Preamble lines are buffered unredacted until a timestamped header
+        // proves whether the file format is parseable. They are dropped without
+        // redaction when a header appears.
+        let mut fallback = BoundedLines::new(MAX_LOG_LINES, max_bytes);
+
+        loop {
+            match read_bounded_line(&mut reader, &mut line, &mut probe).await {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => return error_tail(&path, &error),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return LogTail {
-                    lines: Vec::new(),
-                    truncated: false,
-                    error: Some(format!("failed to read {}: {error}", path.display())),
-                };
+
+            let probe_text = String::from_utf8_lossy(&probe);
+            let text = String::from_utf8_lossy(&line);
+            match parse_line_timestamp(&probe_text) {
+                Some(timestamp) => {
+                    if !has_timestamp {
+                        has_timestamp = true;
+                        fallback.clear();
+                    }
+                    keep_block = timestamp >= start && timestamp <= end;
+                    if keep_block {
+                        retained.push(redactor.redact(&text));
+                    }
+                }
+                None if has_timestamp => {
+                    if keep_block {
+                        retained.push(redactor.redact(&text));
+                    }
+                }
+                None => fallback.push(text.into_owned()),
+            }
+        }
+
+        if !has_timestamp {
+            retained.truncated |= fallback.truncated;
+            for line in fallback.into_vec() {
+                retained.push(redactor.redact(&line));
             }
         }
     }
 
-    finalize(lines, max_bytes)
+    let truncated = retained.truncated;
+    LogTail {
+        lines: retained.into_vec(),
+        truncated,
+        error: None,
+    }
+}
+
+/// Reads one newline-free line, bounding both the retained tail and the
+/// timestamp probe so a pathological line cannot exhaust memory.
+async fn read_bounded_line<R>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+    probe: &mut Vec<u8>,
+) -> std::io::Result<bool>
+where
+    R: AsyncBufRead + Unpin,
+{
+    line.clear();
+    probe.clear();
+    let mut read_any = false;
+    loop {
+        let buffer = reader.fill_buf().await?;
+        if buffer.is_empty() {
+            if !read_any {
+                return Ok(false);
+            }
+            trim_trailing_carriage_return(line);
+            return Ok(true);
+        }
+
+        let newline = buffer.iter().position(|byte| *byte == b'\n');
+        let chunk_len = newline.unwrap_or(buffer.len());
+        if chunk_len > 0 {
+            read_any = true;
+            append_probe(probe, &buffer[..chunk_len]);
+            append_bounded(line, &buffer[..chunk_len]);
+        }
+
+        match newline {
+            Some(index) => {
+                reader.consume(index + 1);
+                trim_trailing_carriage_return(line);
+                return Ok(true);
+            }
+            None => reader.consume(chunk_len),
+        }
+    }
+}
+
+fn append_probe(probe: &mut Vec<u8>, chunk: &[u8]) {
+    if probe.len() >= TIMESTAMP_PROBE_BYTES {
+        return;
+    }
+    let take = (TIMESTAMP_PROBE_BYTES - probe.len()).min(chunk.len());
+    probe.extend_from_slice(&chunk[..take]);
+}
+
+fn append_bounded(line: &mut Vec<u8>, chunk: &[u8]) {
+    if line.len() + chunk.len() <= MAX_LINE_BYTES {
+        line.extend_from_slice(chunk);
+        return;
+    }
+
+    let overflow = line.len() + chunk.len() - MAX_LINE_BYTES;
+    let drained = overflow.min(line.len());
+    line.drain(..drained);
+    line.extend_from_slice(&chunk[overflow - drained..]);
+}
+
+fn trim_trailing_carriage_return(line: &mut Vec<u8>) {
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+}
+
+fn error_tail(path: &Path, error: &std::io::Error) -> LogTail {
+    let message = format!("failed to read {}: {error}", path.display());
+    LogTail {
+        lines: Vec::new(),
+        truncated: false,
+        error: Some(Redactor::new().redact(&message)),
+    }
 }
 
 fn log_file_path(log_dir: &Path, date: NaiveDate) -> PathBuf {
@@ -87,55 +219,78 @@ fn log_file_path(log_dir: &Path, date: NaiveDate) -> PathBuf {
     ))
 }
 
-/// Keeps timestamped lines inside the window together with their continuation
-/// lines, which have no leading timestamp.
+/// Rolling, bounded set of the latest lines.
 ///
-/// A timestamp-less line belongs to the preceding timestamped block, so a
-/// multi-line event is retained or dropped as a whole. When a file contains no
-/// parseable timestamps at all (unknown format), every line is kept rather than
-/// risking an empty tail.
-fn filter_window_lines<'a>(
-    lines: impl Iterator<Item = &'a str>,
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-    output: &mut Vec<String>,
-) {
-    let lines: Vec<&str> = lines.collect();
-    if !lines
-        .iter()
-        .any(|line| parse_line_timestamp(line).is_some())
-    {
-        output.extend(lines.into_iter().map(str::to_string));
-        return;
-    }
-
-    let mut block: Vec<&str> = Vec::new();
-    let mut keep_block = false;
-    let mut seen_header = false;
-    for line in lines {
-        match parse_line_timestamp(line) {
-            Some(timestamp) => {
-                if seen_header {
-                    flush_block(&mut block, keep_block, output);
-                }
-                seen_header = true;
-                keep_block = timestamp >= start && timestamp <= end;
-                block.push(line);
-            }
-            // Lines before the first timestamped header are fragments from an
-            // earlier rotation and carry no usable time, so they are dropped.
-            None if seen_header => block.push(line),
-            None => {}
-        }
-    }
-    flush_block(&mut block, keep_block, output);
+/// Line and byte budgets are enforced on every push, so the structure never
+/// holds more than `max_lines` lines or `max_bytes` of joined output. A single
+/// oversized line is clipped to the trailing `max_bytes` bytes.
+struct BoundedLines {
+    lines: VecDeque<String>,
+    joined_bytes: usize,
+    max_lines: usize,
+    max_bytes: usize,
+    truncated: bool,
 }
 
-fn flush_block(block: &mut Vec<&str>, keep: bool, output: &mut Vec<String>) {
-    if keep {
-        output.extend(block.drain(..).map(str::to_string));
-    } else {
-        block.clear();
+impl BoundedLines {
+    fn new(max_lines: usize, max_bytes: usize) -> Self {
+        Self {
+            lines: VecDeque::new(),
+            joined_bytes: 0,
+            max_lines,
+            max_bytes,
+            truncated: false,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.lines.clear();
+        self.joined_bytes = 0;
+    }
+
+    fn push(&mut self, mut line: String) {
+        if self.max_lines == 0 || self.max_bytes == 0 {
+            self.truncated = true;
+            return;
+        }
+
+        if line.len() > self.max_bytes {
+            let mut start = line.len() - self.max_bytes;
+            while start < line.len() && !line.is_char_boundary(start) {
+                start += 1;
+            }
+            line.drain(..start);
+            self.truncated = true;
+        }
+
+        while self.lines.len() >= self.max_lines {
+            self.pop_front();
+            self.truncated = true;
+        }
+        while !self.lines.is_empty() && self.joined_bytes + 1 + line.len() > self.max_bytes {
+            self.pop_front();
+            self.truncated = true;
+        }
+
+        self.joined_bytes = if self.lines.is_empty() {
+            line.len()
+        } else {
+            self.joined_bytes + 1 + line.len()
+        };
+        self.lines.push_back(line);
+    }
+
+    fn pop_front(&mut self) {
+        if let Some(front) = self.lines.pop_front() {
+            self.joined_bytes = self.joined_bytes.saturating_sub(front.len());
+            if !self.lines.is_empty() {
+                self.joined_bytes = self.joined_bytes.saturating_sub(1);
+            }
+        }
+    }
+
+    fn into_vec(self) -> Vec<String> {
+        self.lines.into_iter().collect()
     }
 }
 
@@ -154,52 +309,6 @@ fn parse_line_timestamp(line: &str) -> Option<DateTime<Utc>> {
         }
     }
     None
-}
-
-/// Redacts retained lines, then caps line count and bytes from the end.
-fn finalize(mut lines: Vec<String>, max_bytes: usize) -> LogTail {
-    let redactor = Redactor::new();
-    for line in &mut lines {
-        *line = redactor.redact(line);
-    }
-
-    let mut truncated = false;
-    if lines.len() > MAX_LOG_LINES {
-        lines.drain(..lines.len() - MAX_LOG_LINES);
-        truncated = true;
-    }
-
-    let mut kept = Vec::with_capacity(lines.len());
-    let mut total_bytes = 0usize;
-    for line in lines.iter().rev() {
-        let separator = usize::from(!kept.is_empty());
-        let cost = line.len() + separator;
-        if total_bytes + cost > max_bytes {
-            truncated = true;
-            break;
-        }
-        total_bytes += cost;
-        kept.push(line.clone());
-    }
-    kept.reverse();
-
-    if kept.is_empty() && !lines.is_empty() {
-        truncated = true;
-        if max_bytes > 0 {
-            let last = lines.last().expect("checked non-empty");
-            let mut start = last.len().saturating_sub(max_bytes);
-            while start > 0 && !last.is_char_boundary(start) {
-                start -= 1;
-            }
-            kept.push(last[start..].to_string());
-        }
-    }
-
-    LogTail {
-        lines: kept,
-        truncated,
-        error: None,
-    }
 }
 
 #[cfg(test)]
@@ -474,6 +583,126 @@ mod tests {
         .await;
         assert!(tail.lines.is_empty());
         assert!(tail.error.is_some());
+    }
+
+    #[test]
+    fn bounded_lines_enforce_budgets_on_every_push() {
+        let mut bounded = BoundedLines::new(MAX_LOG_LINES, 64);
+        for index in 0..1_000 {
+            bounded.push(format!("line-{index:04}-{}", "x".repeat(20)));
+            assert!(
+                bounded.joined_bytes <= 64,
+                "byte budget exceeded: {}",
+                bounded.joined_bytes
+            );
+            assert!(bounded.lines.len() <= MAX_LOG_LINES);
+            let expected = bounded
+                .lines
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
+                .saturating_add(bounded.lines.len().saturating_sub(1));
+            assert_eq!(bounded.joined_bytes, expected);
+        }
+        assert!(bounded.truncated);
+        assert!(bounded
+            .lines
+            .back()
+            .expect("non-empty")
+            .contains("line-0999"));
+    }
+
+    #[tokio::test]
+    async fn log_tail_holds_only_the_byte_budget_for_a_large_day_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut content = String::new();
+        for index in 0..5_000 {
+            content.push_str(&format!(
+                "2026-11-11T12:00:05.000000Z  INFO large-{index}-{}\n",
+                "y".repeat(40)
+            ));
+        }
+        std::fs::write(dir.path().join("cursor-byok.2026-11-11.log"), content).unwrap();
+
+        let tail = collect_log_tail(
+            dir.path(),
+            parse("2026-11-11T12:00:05Z"),
+            Duration::from_secs(60),
+            4096,
+        )
+        .await;
+
+        let joined = tail.lines.join("\n");
+        assert!(joined.len() <= 4096, "budget exceeded: {}", joined.len());
+        assert!(tail.lines.len() <= MAX_LOG_LINES);
+        assert!(tail.truncated);
+        assert!(tail.lines.last().expect("non-empty").contains("large-4999"));
+    }
+
+    #[tokio::test]
+    async fn log_tail_applies_the_byte_cap_after_redaction() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cursor-byok.2026-11-11.log"), "token=S\n").unwrap();
+
+        // The raw line fits in the budget; redaction expands it, so the cap must
+        // be applied to the redacted text and the secret must not survive.
+        let tail = collect_log_tail(
+            dir.path(),
+            parse("2026-11-11T12:00:05Z"),
+            Duration::from_secs(60),
+            9,
+        )
+        .await;
+
+        let joined = tail.lines.join("\n");
+        assert!(
+            !joined.to_lowercase().contains("token"),
+            "not redacted: {joined}"
+        );
+        assert!(joined.contains("REDACTED"), "not redacted: {joined}");
+        assert!(joined.len() <= 9, "budget exceeded: {joined}");
+        assert!(tail.truncated);
+    }
+
+    #[test]
+    fn io_errors_are_redacted_before_being_returned() {
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let tail = error_tail(Path::new("/Users/alice/logs/cursor-byok.log"), &error);
+        let message = tail.error.expect("io error");
+        assert!(!message.contains("alice"), "leaked user path: {message}");
+        assert!(message.contains('~'), "path not redacted: {message}");
+    }
+
+    #[tokio::test]
+    async fn log_tail_caps_the_fallback_when_no_timestamps_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut content = String::new();
+        for index in 0..250 {
+            content.push_str(&format!("plain line {index}\n"));
+        }
+        std::fs::write(dir.path().join("cursor-byok.2026-11-11.log"), content).unwrap();
+
+        let tail = collect_log_tail(
+            dir.path(),
+            parse("2026-11-11T12:00:05Z"),
+            Duration::from_secs(60),
+            1_000_000,
+        )
+        .await;
+
+        assert_eq!(tail.lines.len(), MAX_LOG_LINES);
+        assert!(tail.truncated);
+        assert!(tail
+            .lines
+            .first()
+            .expect("non-empty")
+            .contains("plain line 50"));
+        assert!(!tail.lines.iter().any(|line| line.contains("plain line 49")));
+        assert!(tail
+            .lines
+            .last()
+            .expect("non-empty")
+            .contains("plain line 249"));
     }
 
     fn parse(value: &str) -> DateTime<Utc> {
