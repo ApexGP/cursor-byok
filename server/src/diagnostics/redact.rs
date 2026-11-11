@@ -65,8 +65,11 @@ struct Patterns {
 fn patterns() -> &'static Patterns {
     static PATTERNS: OnceLock<Patterns> = OnceLock::new();
     PATTERNS.get_or_init(|| Patterns {
+        // Authorization values may contain multiple tokens, quoted parameters,
+        // commas, and unknown schemes, so consume the entire rest of the line.
+        // Over-redacting trailing fields on that line is intentional.
         authorization: Regex::new(
-            r#"(?i)(?:\bauthorization["']?\s*[:=]\s*(?:(?:bearer|basic|digest|negotiate|ntlm|token|apikey|hoba|mutual|aws4-hmac-sha256)\s+)?(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)|\bbearer\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+))"#,
+            r#"(?i)(?:\bauthorization["']?\s*[:=][^\r\n]*|\bbearer\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+))"#,
         )
         .expect("valid authorization regex"),
         key_value: Regex::new(
@@ -94,7 +97,7 @@ mod tests {
     #[test]
     fn redacts_common_credentials_and_user_paths() {
         let input = concat!(
-            "Authorization: Bearer sk-live-SENTINEL ",
+            "Authorization: Bearer sk-live-SENTINEL\n",
             "api_key=abc123 token=def456 ",
             "jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature ",
             r"path C:\Users\alice\AppData\Local ",
@@ -134,7 +137,37 @@ mod tests {
             "leaked Basic credential: {output}"
         );
         assert!(output.contains("[REDACTED]"));
-        assert!(output.contains("more context"), "over-redacted: {output}");
+    }
+
+    #[test]
+    fn redacts_multi_token_digest_authorization() {
+        let output = Redactor::new().redact(
+            r#"Authorization: Digest username="Mufasa", realm="x", response="digest-SENTINEL""#,
+        );
+        for secret in ["Mufasa", "digest-SENTINEL", "realm"] {
+            assert!(!output.contains(secret), "leaked {secret}: {output}");
+        }
+        assert_eq!(output, "[REDACTED]");
+    }
+
+    #[test]
+    fn redacts_aws4_authorization() {
+        let output = Redactor::new().redact(
+            "Authorization: AWS4-HMAC-SHA256 Credential=AKIA-SENTINEL/20261111/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=aws4-SENTINEL",
+        );
+        for secret in ["AKIA-SENTINEL", "aws4-SENTINEL", "SignedHeaders"] {
+            assert!(!output.contains(secret), "leaked {secret}: {output}");
+        }
+        assert_eq!(output, "[REDACTED]");
+    }
+
+    #[test]
+    fn redacts_unknown_authorization_scheme() {
+        let output = Redactor::new().redact("Authorization: SSWS unknown-SENTINEL, extra=context");
+        for secret in ["unknown-SENTINEL", "extra=context", "SSWS"] {
+            assert!(!output.contains(secret), "leaked {secret}: {output}");
+        }
+        assert_eq!(output, "[REDACTED]");
     }
 
     #[test]
