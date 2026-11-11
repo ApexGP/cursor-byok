@@ -23,7 +23,7 @@ export class DiagnosticsErrorBoundary extends Component<Props, State> {
     if (this.state.failed) {
       return <div style={{ padding: 24 }}>
         <strong>{t("界面渲染失败")}</strong>
-        <p>{t("可点击右上角“检测到问题”查看并反馈诊断信息。")}</p>
+        <p>{t("可点击右下角“检测到问题”查看并反馈诊断信息。")}</p>
       </div>;
     }
     return this.props.children;

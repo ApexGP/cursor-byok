@@ -42,6 +42,10 @@ impl Redactor {
             .macos_user_path
             .replace_all(&output, "~")
             .into_owned();
+        output = patterns
+            .linux_user_path
+            .replace_all(&output, "~")
+            .into_owned();
         patterns.email.replace_all(&output, "[email]").into_owned()
     }
 }
@@ -59,6 +63,7 @@ struct Patterns {
     provider_key: Regex,
     windows_user_path: Regex,
     macos_user_path: Regex,
+    linux_user_path: Regex,
     email: Regex,
 }
 
@@ -85,6 +90,7 @@ fn patterns() -> &'static Patterns {
         windows_user_path: Regex::new(r"(?i)\b[a-z]:[\\/]+users[\\/]+[^\\/\s]+")
             .expect("valid windows path regex"),
         macos_user_path: Regex::new(r"(?i)/users/[^/\s]+").expect("valid macos path regex"),
+        linux_user_path: Regex::new(r"(?i)/home/[^/\s]+").expect("valid linux path regex"),
         email: Regex::new(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
             .expect("valid email regex"),
     })
@@ -101,6 +107,7 @@ mod tests {
             "api_key=abc123 token=def456 ",
             "jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature ",
             r"path C:\Users\alice\AppData\Local ",
+            "linux path /home/bob/project ",
             "email report@example.com"
         );
         let output = Redactor::new().redact(input);
@@ -110,6 +117,7 @@ mod tests {
             "def456",
             "eyJhbGci",
             "alice",
+            "bob",
             "report@example.com",
         ] {
             assert!(!output.contains(secret), "leaked {secret}: {output}");

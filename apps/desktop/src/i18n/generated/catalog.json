@@ -481,6 +481,18 @@
         }
       ]
     },
+    "133d0ce83f05f1b1": {
+      "source": "上传并创建 Issue",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 65,
+          "column": 18
+        }
+      ]
+    },
     "13a9ac7a68c5fd96": {
       "source": "CA 仅保存在本机，用于安全解析 Cursor 的 HTTPS 请求。",
       "kind": "text",
@@ -1142,6 +1154,32 @@
         }
       ]
     },
+    "304407e2e22bad56": {
+      "source": "检测到 {count} 个问题",
+      "kind": "template",
+      "placeholders": [
+        "count"
+      ],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsButton.tsx",
+          "line": 15,
+          "column": 19
+        }
+      ]
+    },
+    "310eeb40b121e479": {
+      "source": "创建 Issue 前会自动上传脱敏诊断包；未提交 Issue 时服务端会在 30 天后删除。本机不保留诊断包。",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 99,
+          "column": 41
+        }
+      ]
+    },
     "3260348163d03b8e": {
       "source": "留空保持不变",
       "kind": "text",
@@ -1185,6 +1223,20 @@
           "file": "features/models/CursorModelCards.tsx",
           "line": 156,
           "column": 64
+        }
+      ]
+    },
+    "35b1d90082620d0f": {
+      "source": "出现 {count} 次",
+      "kind": "template",
+      "placeholders": [
+        "count"
+      ],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 90,
+          "column": 39
         }
       ]
     },
@@ -1632,6 +1684,11 @@
       "kind": "text",
       "placeholders": [],
       "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 97,
+          "column": 52
+        },
         {
           "file": "features/settings/CommitSettingsCard.tsx",
           "line": 148,
@@ -2452,6 +2509,18 @@
         }
       ]
     },
+    "6cfaf4efded42f4f": {
+      "source": "界面渲染失败",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsErrorBoundary.tsx",
+          "line": 25,
+          "column": 18
+        }
+      ]
+    },
     "6d1876364ac6457d": {
       "source": "代理方式",
       "kind": "text",
@@ -2500,6 +2569,18 @@
         }
       ]
     },
+    "725082e73fa4a566": {
+      "source": "诊断上传服务未配置，暂时无法创建 Issue。",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 100,
+          "column": 70
+        }
+      ]
+    },
     "72644ec4389da2f7": {
       "source": "默认平铺",
       "kind": "text",
@@ -2509,6 +2590,18 @@
           "file": "features/models/CursorSettingsPage.tsx",
           "line": 314,
           "column": 105
+        }
+      ]
+    },
+    "733fdcb07a11c1b5": {
+      "source": "问题列表",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 80,
+          "column": 48
         }
       ]
     },
@@ -2639,7 +2732,7 @@
       "refs": [
         {
           "file": "App.tsx",
-          "line": 60,
+          "line": 94,
           "column": 21
         }
       ]
@@ -2701,6 +2794,23 @@
           "file": "shared/api.ts",
           "line": 284,
           "column": 21
+        }
+      ]
+    },
+    "836a88d16ad185ee": {
+      "source": "检测到问题",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsButton.tsx",
+          "line": 18,
+          "column": 14
+        },
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 60,
+          "column": 12
         }
       ]
     },
@@ -3692,6 +3802,18 @@
         }
       ]
     },
+    "b317dbdf7e97bd94": {
+      "source": "查看诊断 JSON",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 103,
+          "column": 23
+        }
+      ]
+    },
     "b4411558b932266f": {
       "source": "上游类型",
       "kind": "text",
@@ -3742,6 +3864,18 @@
           "file": "features/calls/CallTable.tsx",
           "line": 143,
           "column": 42
+        }
+      ]
+    },
+    "b5e192947797a28f": {
+      "source": "忽略此问题",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 76,
+          "column": 11
         }
       ]
     },
@@ -4015,6 +4149,18 @@
         }
       ]
     },
+    "c5ccc1bcbccbff3e": {
+      "source": "选择左侧问题查看详情",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 107,
+          "column": 64
+        }
+      ]
+    },
     "c7ea2c9bc43134bd": {
       "source": "编辑模型",
       "kind": "text",
@@ -4162,6 +4308,18 @@
         }
       ]
     },
+    "d0bf874f6cb06fc7": {
+      "source": "Issue 正文预览",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 101,
+          "column": 55
+        }
+      ]
+    },
     "d0bfccc77315d887": {
       "source": "近一个月",
       "kind": "text",
@@ -4270,6 +4428,18 @@
           "file": "shared/ui/FormControls.tsx",
           "line": 15,
           "column": 95
+        }
+      ]
+    },
+    "d5345f0bb241d12d": {
+      "source": "没有待处理的问题",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 93,
+          "column": 66
         }
       ]
     },
@@ -4434,6 +4604,18 @@
           "file": "features/models/LegacyModelImport.tsx",
           "line": 69,
           "column": 56
+        }
+      ]
+    },
+    "ddac31ddf0b1c161": {
+      "source": "正在上传诊断包…",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 110,
+          "column": 63
         }
       ]
     },
@@ -5009,6 +5191,18 @@
         }
       ]
     },
+    "f8f67ff009090e94": {
+      "source": "已上传诊断包并打开 GitHub，请检查后点击 Submit",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsDialog.tsx",
+          "line": 51,
+          "column": 15
+        }
+      ]
+    },
     "f95ea7f4c063eea7": {
       "source": "未启用",
       "kind": "text",
@@ -5179,6 +5373,18 @@
           "file": "features/settings/PricingSettingsCard.tsx",
           "line": 100,
           "column": 24
+        }
+      ]
+    },
+    "fe8f4d19321d1882": {
+      "source": "可点击右下角“检测到问题”查看并反馈诊断信息。",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/diagnostics/DiagnosticsErrorBoundary.tsx",
+          "line": 26,
+          "column": 13
         }
       ]
     },
