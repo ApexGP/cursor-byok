@@ -20,6 +20,8 @@ use crate::{
 
 /// Total request timeout for one upload attempt.
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// Relay responses are tiny; refuse to buffer more than this from a peer.
+const MAX_UPLOAD_RESPONSE_BYTES: usize = 64 * 1024;
 const SCHEMA_VERSION: &str = "1";
 
 /// A bundle accepted by the diagnostic service.
@@ -85,23 +87,58 @@ async fn upload_bundle_with_timeout(
         )));
     }
 
-    let text = response.text().await?;
-    let parsed: UploadResponse = serde_json::from_str(&text)
+    let body = read_response_body(response).await?;
+    let parsed: UploadResponse = serde_json::from_slice(&body)
         .map_err(|error| Error::Protocol(format!("invalid diagnostic upload response: {error}")))?;
     let expires_at = DateTime::parse_from_rfc3339(parsed.expires_at.trim())
         .map_err(|error| Error::Protocol(format!("invalid diagnostic upload expiry: {error}")))?
         .with_timezone(&Utc);
-    let link_url = parsed.url.trim();
-    if link_url.is_empty() {
-        return Err(Error::Protocol(
-            "invalid diagnostic upload response: empty url".to_string(),
-        ));
-    }
+    let link_url = validate_link_url(&parsed.url)?;
 
     Ok(UploadedBundle {
-        url: link_url.to_string(),
+        url: link_url,
         expires_at,
     })
+}
+
+/// Reads at most [`MAX_UPLOAD_RESPONSE_BYTES`] from the relay response.
+async fn read_response_body(mut response: reqwest::Response) -> Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_UPLOAD_RESPONSE_BYTES as u64)
+    {
+        return Err(response_too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len() + chunk.len() > MAX_UPLOAD_RESPONSE_BYTES {
+            return Err(response_too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn response_too_large() -> Error {
+    Error::Protocol(format!(
+        "diagnostic upload response exceeds {MAX_UPLOAD_RESPONSE_BYTES} bytes"
+    ))
+}
+
+/// Accepts only absolute `http(s)` links with a host.
+///
+/// The relay is a network peer; never hand schemes such as `javascript:` or
+/// `file:` to the UI or an OS open handler.
+fn validate_link_url(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|error| Error::Protocol(format!("invalid diagnostic bundle url: {error}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(Error::Protocol(format!(
+            "invalid diagnostic bundle url scheme: {trimmed}"
+        )));
+    }
+    Ok(trimmed.to_string())
 }
 
 /// Builds the bundle and uploads it, returning the link to embed in an issue.
@@ -131,7 +168,7 @@ mod tests {
     use crate::Error;
     use axum::{
         body::Bytes,
-        extract::State,
+        extract::{DefaultBodyLimit, State},
         http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
         response::IntoResponse,
         routing::post,
@@ -172,6 +209,9 @@ mod tests {
         let state: MockState = Arc::new((captured.clone(), MockResponse { status, body }));
         let router = Router::new()
             .route("/upload", post(mock_handler))
+            .layer(DefaultBodyLimit::max(
+                crate::diagnostics::bundle::MAX_BUNDLE_BYTES,
+            ))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -198,12 +238,45 @@ mod tests {
         LogTail::default()
     }
 
-    fn assert_dir_empty(dir: &std::path::Path) {
+    fn config_with_data_dir(upload_url: Option<String>, data_dir: PathBuf) -> DiagnosticsConfig {
+        let mut configured = config(upload_url);
+        configured.data_dir = data_dir;
+        configured
+    }
+
+    /// Fails if bundle production code created its configured data directory or
+    /// left any file under the observable temp root.
+    fn assert_no_local_bundle(config: &DiagnosticsConfig, temp: &tempfile::TempDir) {
         assert!(
-            std::fs::read_dir(dir).unwrap().next().is_none(),
-            "bundle leaked into {}",
-            dir.display()
+            !config.data_dir.exists(),
+            "diagnostics data dir was created: {}",
+            config.data_dir.display()
         );
+        assert!(
+            std::fs::read_dir(temp.path()).unwrap().next().is_none(),
+            "bundle leaked into {}",
+            temp.path().display()
+        );
+    }
+
+    fn pseudo_random_lines(count: usize, line_bytes: usize) -> LogTail {
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut lines = Vec::with_capacity(count);
+        for _ in 0..count {
+            let mut line = String::with_capacity(line_bytes);
+            for _ in 0..line_bytes {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                line.push((b'!' + (state % 94) as u8) as char);
+            }
+            lines.push(line);
+        }
+        LogTail {
+            lines,
+            truncated: false,
+            error: None,
+        }
     }
 
     #[test]
@@ -352,14 +425,13 @@ mod tests {
     async fn build_upload_and_link_failure_leaves_no_local_bundle() {
         let temp = tempfile::tempdir().unwrap();
         let report = test_report(DiagnosticCode::Sync);
-        let result = build_upload_and_link(
-            &config(Some("http://127.0.0.1:1/upload".to_string())),
-            &report,
-            &empty_log_tail(),
-        )
-        .await;
+        let configured = config_with_data_dir(
+            Some("http://127.0.0.1:1/upload".to_string()),
+            temp.path().join("diagnostics"),
+        );
+        let result = build_upload_and_link(&configured, &report, &empty_log_tail()).await;
         assert!(result.is_err());
-        assert_dir_empty(temp.path());
+        assert_no_local_bundle(&configured, &temp);
     }
 
     #[tokio::test]
@@ -375,8 +447,9 @@ mod tests {
             }),
         )
         .await;
+        let configured = config_with_data_dir(Some(url), temp.path().join("diagnostics"));
 
-        let link = build_upload_and_link(&config(Some(url)), &report, &empty_log_tail())
+        let link = build_upload_and_link(&configured, &report, &empty_log_tail())
             .await
             .unwrap();
 
@@ -391,7 +464,78 @@ mod tests {
         let body = captured.lock().await.body.clone().unwrap();
         let expected = hex::encode(sha2::Sha256::digest(&body));
         assert_eq!(link.sha256, expected);
-        assert_dir_empty(temp.path());
+        assert_no_local_bundle(&configured, &temp);
+    }
+
+    #[tokio::test]
+    async fn build_upload_and_link_trims_oversized_logs_before_upload() {
+        let report = test_report(DiagnosticCode::Sync);
+        // Oversized tail forces build_bundle's trim loop, after which the
+        // trimmed bundle must still upload successfully.
+        let log_tail = pseudo_random_lines(8, 768 * 1024);
+        let (url, captured) = spawn_mock(
+            StatusCode::CREATED,
+            json!({
+                "id": report.report_id,
+                "url": "https://diag.example/r/r-20261111-0123456789abcdef0123456789abcdef",
+                "expiresAt": "2026-12-11T12:34:56Z",
+            }),
+        )
+        .await;
+
+        let link = build_upload_and_link(&config(Some(url)), &report, &log_tail)
+            .await
+            .unwrap();
+        assert_eq!(
+            link.url,
+            "https://diag.example/r/r-20261111-0123456789abcdef0123456789abcdef"
+        );
+
+        let body = captured.lock().await.body.clone().unwrap();
+        assert!(body.len() <= crate::diagnostics::bundle::MAX_BUNDLE_BYTES);
+        assert_eq!(link.sha256, hex::encode(sha2::Sha256::digest(&body)));
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_non_http_bundle_urls() {
+        let report = test_report(DiagnosticCode::Sync);
+        let bundle = build_bundle(&report, &empty_log_tail()).await.unwrap();
+        for bad_url in [
+            "javascript:alert(1)",
+            "file:///tmp/bundle.zip",
+            "data:text/html,<script>alert(1)</script>",
+        ] {
+            let (url, _) = spawn_mock(
+                StatusCode::CREATED,
+                json!({ "url": bad_url, "expiresAt": "2026-12-11T12:34:56Z" }),
+            )
+            .await;
+            let error = upload_bundle(&config(Some(url)), &report.report_id, &bundle)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::Protocol(_)), "{bad_url}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_oversized_response_bodies() {
+        let report = test_report(DiagnosticCode::Sync);
+        let bundle = build_bundle(&report, &empty_log_tail()).await.unwrap();
+        let (url, _) = spawn_mock(
+            StatusCode::CREATED,
+            json!({
+                "url": "https://diag.example/r/x",
+                "expiresAt": "2026-12-11T12:34:56Z",
+                "padding": "x".repeat(MAX_UPLOAD_RESPONSE_BYTES + 1),
+            }),
+        )
+        .await;
+
+        let error = upload_bundle(&config(Some(url)), &report.report_id, &bundle)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Protocol(_)), "{error}");
+        assert!(error.to_string().contains("exceeds"), "{error}");
     }
 
     #[tokio::test]

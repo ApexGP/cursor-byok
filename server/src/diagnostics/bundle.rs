@@ -34,13 +34,66 @@ pub struct Bundle {
 
 /// Names of the payload entries; `manifest.json` is added separately.
 const PAYLOAD_ENTRIES: usize = 4;
+/// Upper bound on log-trim iterations before giving up on an oversized zip.
+const MAX_TRIM_ATTEMPTS: usize = 16;
+
+struct SealedZip {
+    bytes: Vec<u8>,
+    manifest: Value,
+}
 
 /// Builds the diagnostic zip in memory and hashes the sealed bytes.
+///
+/// If the sealed zip exceeds [`MAX_BUNDLE_BYTES`], the log tail is halved
+/// deterministically (newest lines retained), `report.json` and the manifest
+/// are rebuilt with the trimmed tail, and the zip is resealed. This mirrors the
+/// design's "trim logs first, then reject" rule. If trimming cannot get under
+/// the cap, a structured error is returned.
 ///
 /// The manifest intentionally omits the zip SHA-256: embedding it would change
 /// the zip and invalidate the hash. The hash travels with [`Bundle::sha256`]
 /// and as the `X-Report-SHA256` upload header instead.
 pub async fn build_bundle(report: &DiagnosticReport, log_tail: &LogTail) -> Result<Bundle> {
+    let mut tail = log_tail.clone();
+    let mut trims = 0;
+    loop {
+        let sealed = seal_zip(report, &tail)?;
+        if sealed.bytes.len() <= MAX_BUNDLE_BYTES {
+            return Ok(Bundle {
+                sha256: sha256_hex(&sealed.bytes),
+                bytes: sealed.bytes,
+                manifest: sealed.manifest,
+            });
+        }
+        if trims >= MAX_TRIM_ATTEMPTS || !trim_log_tail(&mut tail) {
+            return Err(Error::Protocol(format!(
+                "diagnostic bundle is {} bytes after trimming logs, exceeding the {} byte limit",
+                sealed.bytes.len(),
+                MAX_BUNDLE_BYTES
+            )));
+        }
+        trims += 1;
+    }
+}
+
+/// Keeps the newest half of the log tail, marking it truncated.
+///
+/// Returns `false` when there is nothing left to trim.
+fn trim_log_tail(log_tail: &mut LogTail) -> bool {
+    let len = log_tail.lines.len();
+    // A single line cannot shrink by dropping lines; stop instead of
+    // re-sealing the same oversized payload until the attempt cap.
+    if len <= 1 {
+        return false;
+    }
+    let keep = len.div_ceil(2);
+    log_tail.lines.drain(..len - keep);
+    log_tail.truncated = true;
+    true
+}
+
+/// Serializes the payload entries and writes one in-memory zip.
+fn seal_zip(report: &DiagnosticReport, log_tail: &LogTail) -> Result<SealedZip> {
     // `report.json` is the full report; keep its embedded log section aligned
     // with the tail that is actually sealed into `logs/tail.log`.
     let mut embedded_report = report.clone();
@@ -71,20 +124,7 @@ pub async fn build_bundle(report: &DiagnosticReport, log_tail: &LogTail) -> Resu
     }
     let bytes = writer.finish().map_err(zip_error)?.into_inner();
 
-    if bytes.len() > MAX_BUNDLE_BYTES {
-        return Err(Error::Protocol(format!(
-            "diagnostic bundle is {} bytes, exceeding the {} byte limit",
-            bytes.len(),
-            MAX_BUNDLE_BYTES
-        )));
-    }
-
-    let sha256 = sha256_hex(&bytes);
-    Ok(Bundle {
-        bytes,
-        sha256,
-        manifest,
-    })
+    Ok(SealedZip { bytes, manifest })
 }
 
 /// Joins the redacted log tail and terminates non-empty output with a newline.
@@ -165,24 +205,33 @@ mod tests {
         entries
     }
 
-    fn pseudo_random_lines(count: usize, line_bytes: usize) -> LogTail {
+    fn pseudo_random_text(bytes: usize) -> String {
         let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-        let mut lines = Vec::with_capacity(count);
-        for _ in 0..count {
-            let mut line = String::with_capacity(line_bytes);
-            for _ in 0..line_bytes {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                line.push((b'!' + (state % 94) as u8) as char);
-            }
-            lines.push(line);
+        let mut text = String::with_capacity(bytes);
+        for _ in 0..bytes {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            text.push((b'!' + (state % 94) as u8) as char);
         }
+        text
+    }
+
+    fn pseudo_random_lines(count: usize, line_bytes: usize) -> LogTail {
         LogTail {
-            lines,
+            lines: (0..count).map(|_| pseudo_random_text(line_bytes)).collect(),
             truncated: false,
             error: None,
         }
+    }
+
+    fn entry(entries: &[(String, Vec<u8>)], name: &str) -> Vec<u8> {
+        entries
+            .iter()
+            .find(|(entry_name, _)| entry_name == name)
+            .unwrap()
+            .1
+            .clone()
     }
 
     #[tokio::test]
@@ -261,13 +310,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bundle_rejects_payloads_over_eight_mib() {
+    async fn bundle_trims_oversized_logs_until_under_the_cap() {
         let report = test_report(DiagnosticCode::Sync);
         // Roughly 6 MiB of incompressible text appears twice (report + tail),
-        // so the sealed zip must exceed the hard cap.
+        // so the first seal exceeds 8 MiB and must trigger log trimming.
         let log_tail = pseudo_random_lines(8, 768 * 1024);
 
-        let error = build_bundle(&report, &log_tail).await.unwrap_err();
+        let bundle = build_bundle(&report, &log_tail).await.unwrap();
+        assert!(bundle.bytes.len() <= MAX_BUNDLE_BYTES);
+
+        let entries = read_entries(&bundle.bytes);
+        let manifest: Value = serde_json::from_slice(&entry(&entries, "manifest.json")).unwrap();
+        assert_eq!(manifest["logsTruncated"], true);
+
+        let tail_text = String::from_utf8(entry(&entries, "logs/tail.log")).unwrap();
+        let trimmed: Vec<&str> = tail_text.lines().collect();
+        assert!(
+            trimmed.len() < log_tail.lines.len(),
+            "expected trimming, still {} lines",
+            trimmed.len()
+        );
+        assert_eq!(
+            trimmed.last().copied(),
+            Some(log_tail.lines.last().unwrap().as_str())
+        );
+
+        let report_json: Value = serde_json::from_slice(&entry(&entries, "report.json")).unwrap();
+        assert_eq!(report_json["logs"]["truncated"], true);
+        assert_eq!(
+            report_json["logs"]["tail"],
+            json!(trimmed
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>())
+        );
+    }
+
+    #[tokio::test]
+    async fn bundle_rejects_oversized_non_log_content() {
+        let mut report = test_report(DiagnosticCode::Sync);
+        // Log trimming cannot shrink this payload; it must still be rejected.
+        report.timeline = vec![json!({
+            "at": "2026-11-11T12:34:56Z",
+            "event": "captured",
+            "detail": pseudo_random_text(12 * 1024 * 1024),
+        })];
+
+        let error = build_bundle(&report, &empty_log_tail()).await.unwrap_err();
+        assert!(
+            matches!(error, Error::Protocol(_)),
+            "unexpected error: {error}"
+        );
         assert!(error.to_string().contains("8"), "unexpected error: {error}");
     }
 }
