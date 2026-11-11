@@ -27,7 +27,7 @@ impl Redactor {
             .into_owned();
         output = patterns
             .key_value
-            .replace_all(&output, "[REDACTED]")
+            .replace_all(&output, "${prefix}[REDACTED]")
             .into_owned();
         output = patterns.jwt.replace_all(&output, "[REDACTED]").into_owned();
         output = patterns
@@ -66,11 +66,11 @@ fn patterns() -> &'static Patterns {
     static PATTERNS: OnceLock<Patterns> = OnceLock::new();
     PATTERNS.get_or_init(|| Patterns {
         authorization: Regex::new(
-            r"(?i)(?:\bauthorization\s*[:=]\s*(?:bearer\s+)?|\bbearer\s+)[^\s,;]+",
+            r#"(?i)(?:\bauthorization["']?\s*[:=]\s*(?:(?:bearer|basic|digest|negotiate|ntlm|token|apikey|hoba|mutual|aws4-hmac-sha256)\s+)?(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)|\bbearer\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+))"#,
         )
         .expect("valid authorization regex"),
         key_value: Regex::new(
-            r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|key|token|password|passwd|secret|jwt)\s*[:=]\s*[^\s,;]+",
+            r#"(?i)(?P<prefix>^|[^A-Za-z0-9])["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|key|token|password|passwd|secret|jwt)["']?\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"#,
         )
         .expect("valid key/value regex"),
         jwt: Regex::new(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
@@ -123,6 +123,40 @@ mod tests {
         assert!(!output.contains("alice"), "leaked user: {output}");
         assert!(output.contains("[REDACTED]"));
         assert!(output.contains('~'));
+    }
+
+    #[test]
+    fn redacts_non_bearer_authorization_schemes() {
+        let output = Redactor::new()
+            .redact("Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ== more context");
+        assert!(
+            !output.contains("QWxhZGRpbjpvcGVuIHNlc2FtZQ=="),
+            "leaked Basic credential: {output}"
+        );
+        assert!(output.contains("[REDACTED]"));
+        assert!(output.contains("more context"), "over-redacted: {output}");
+    }
+
+    #[test]
+    fn redacts_quoted_json_sensitive_keys() {
+        let output = Redactor::new().redact(r#"{"api_key": "json-SENTINEL", "ok": true}"#);
+        assert!(
+            !output.contains("json-SENTINEL"),
+            "leaked JSON key: {output}"
+        );
+        assert!(output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redacts_quoted_values_containing_spaces() {
+        let output = Redactor::new().redact(r#"password="my secret SENTINEL" next=field"#);
+        assert!(
+            !output.contains("SENTINEL"),
+            "leaked quoted value: {output}"
+        );
+        assert!(!output.contains("secret SENTINEL"), "leaked tail: {output}");
+        assert!(output.contains("[REDACTED]"));
+        assert!(output.contains("next=field"), "over-redacted: {output}");
     }
 
     #[test]
