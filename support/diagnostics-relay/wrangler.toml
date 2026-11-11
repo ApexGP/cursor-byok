@@ -1,0 +1,14 @@
+name = "cursor-byok-diagnostics"
+main = "src/index.js"
+compatibility_date = "2026-11-11"
+
+# The worker only stores opaque, already-redacted zip files. Configure a 30-day
+# R2 lifecycle rule for the `reports/` prefix in the Cloudflare dashboard; the
+# worker also returns `expiresAt` so clients can display the retention window.
+[[r2_buckets]]
+binding = "DIAGNOSTICS_BUCKET"
+bucket_name = "cursor-byok-diagnostics"
+
+[vars]
+MAX_BUNDLE_BYTES = "8388608"
+RETENTION_DAYS = "30"
