@@ -23,7 +23,6 @@ pub struct IssueDraft {
     pub labels: Vec<String>,
 }
 
-const JSON_SENTINEL: &str = "__CURSOR_BYOK_DIAGNOSTIC_JSON__";
 const TITLE_SUMMARY_CHARS: usize = 80;
 
 /// Renders title, body and labels for a prefilled GitHub issue.
@@ -41,18 +40,28 @@ pub fn render_issue(
     let bundle_slot = render_bundle_slot(bundle);
     let redaction = render_redaction_notes(&report.redaction);
 
-    let template = render_template(
+    // Measure the template with an empty JSON slot, then render it once with
+    // the fitted JSON. This avoids searching template text for a placeholder
+    // that user-controlled slots could also contain.
+    let overhead = render_template(
         &summary,
         &environment,
         &happened,
         &bundle_slot,
         &redaction,
-        JSON_SENTINEL,
-    );
-    let overhead = template.len().saturating_sub(JSON_SENTINEL.len());
+        "",
+    )
+    .len();
     let budget = ISSUE_BODY_LIMIT.saturating_sub(overhead).max(64);
     let diagnostic_json = crate::diagnostics::report::issue_json(report, bundle, budget)?;
-    let body = template.replacen(JSON_SENTINEL, &diagnostic_json, 1);
+    let body = render_template(
+        &summary,
+        &environment,
+        &happened,
+        &bundle_slot,
+        &redaction,
+        &diagnostic_json,
+    );
 
     Ok(IssueDraft {
         title,
@@ -319,6 +328,20 @@ mod tests {
         assert!(!body.contains("conv-sentinel"));
         assert!(body.contains("CURSOR_BYOK_DIAGNOSTIC_START"));
         assert!(body.contains("CURSOR_BYOK_DIAGNOSTIC_END"));
+    }
+
+    #[test]
+    fn sentinel_in_a_slot_does_not_corrupt_the_json_block() {
+        let mut report = test_report(DiagnosticCode::Sync);
+        report.summary = "__CURSOR_BYOK_DIAGNOSTIC_JSON__ summary".to_string();
+        let body = render_issue(&report, None, "ApexGP/cursor-byok")
+            .unwrap()
+            .body;
+        assert!(body.contains("__CURSOR_BYOK_DIAGNOSTIC_JSON__"));
+        let parsed: Value = serde_json::from_str(extract_between_markers(&body).unwrap()).unwrap();
+        assert_eq!(parsed["schemaVersion"], 1);
+        assert_eq!(parsed["logs"]["truncated"], false);
+        assert!(body.len() <= ISSUE_BODY_LIMIT);
     }
 
     #[test]

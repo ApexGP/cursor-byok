@@ -27,6 +27,8 @@ use crate::{
 pub const ISSUE_DIAGNOSTIC_JSON_LIMIT: usize = 6000;
 /// `logs.tail` lines embedded into issue JSON (the bundle keeps more).
 const ISSUE_LOG_LINES: usize = 40;
+/// Arrays are capped at this many items before per-report truncation runs.
+const MAX_TIMELINE_ENTRIES: usize = 20;
 /// Log tail budget for a freshly assembled report.
 const LOG_TAIL_BUDGET_BYTES: usize = 16 * 1024;
 
@@ -110,6 +112,7 @@ async fn build_report_inner(
         state_db,
     )
     .await;
+    let timeline = timeline_for_event(&event);
 
     Ok(DiagnosticReport {
         schema_version: 1,
@@ -121,11 +124,27 @@ async fn build_report_inner(
         app,
         error: event_error_value(&event),
         context: event.context,
-        timeline: Vec::new(),
+        timeline,
         logs,
         database,
         redaction: redaction_value(),
     })
+}
+
+/// Builds the initial timeline from the captured event, capped newest-first.
+///
+/// Only the redacted summary is used; run/request/conversation identifiers are
+/// never copied into the timeline.
+fn timeline_for_event(event: &DiagnosticEvent) -> Vec<Value> {
+    let mut timeline = vec![json!({
+        "at": timestamp(event.captured_at),
+        "event": "captured",
+        "detail": &event.summary,
+    })];
+    if timeline.len() > MAX_TIMELINE_ENTRIES {
+        timeline.drain(..timeline.len() - MAX_TIMELINE_ENTRIES);
+    }
+    timeline
 }
 
 fn event_error_value(event: &DiagnosticEvent) -> Value {
@@ -256,21 +275,28 @@ fn report_to_value(report: &DiagnosticReport, bundle: Option<&BundleLink>) -> Va
             "version": &report.app.app_version,
             "platform": &report.app.platform,
             "arch": &report.app.arch,
+            "channel": "release",
         }),
     );
     map.insert(
         "cursor".to_string(),
         json!({
             "version": &report.app.cursor_version,
-            "installKind": Value::Null,
+            "installKind": "unknown",
         }),
     );
     map.insert("error".to_string(), report.error.clone());
     map.insert("context".to_string(), context_value(&report.context));
-    map.insert(
-        "timeline".to_string(),
-        Value::Array(report.timeline.clone()),
-    );
+
+    let mut timeline = report.timeline.clone();
+    let timeline_truncated = timeline.len() > MAX_TIMELINE_ENTRIES;
+    if timeline_truncated {
+        timeline.drain(..timeline.len() - MAX_TIMELINE_ENTRIES);
+    }
+    map.insert("timeline".to_string(), Value::Array(timeline));
+    if timeline_truncated {
+        map.insert("timelineTruncated".to_string(), json!(true));
+    }
     map.insert("logs".to_string(), Value::Object(logs));
     map.insert(
         "database".to_string(),
@@ -402,16 +428,19 @@ fn set_flag(value: &mut Value, pointer: &str, key: &str) {
 
 /// Last-resort reduction before falling back to a minimal document.
 fn compact_report_value(value: &mut Value) {
+    let mut logs_truncated = false;
     if let Some(lines) = value
         .pointer_mut("/logs/tail")
         .and_then(Value::as_array_mut)
     {
         if lines.len() > 3 {
-            let drop = lines.len() - 3;
-            lines.drain(..drop);
+            lines.drain(..lines.len() - 3);
+            logs_truncated = true;
         }
     }
-    set_flag(value, "/logs", "truncated");
+    if logs_truncated {
+        set_flag(value, "/logs", "truncated");
+    }
 
     let had_timeline = value
         .get("timeline")
@@ -451,6 +480,7 @@ fn compact_report_value(value: &mut Value) {
         }
     }
 
+    let mut state_truncated = false;
     for key in [
         "catalogIds",
         "syncedIds",
@@ -460,10 +490,15 @@ fn compact_report_value(value: &mut Value) {
     ] {
         let pointer = format!("/database/cursorState/{key}");
         if let Some(items) = value.pointer_mut(&pointer).and_then(Value::as_array_mut) {
-            items.clear();
+            if !items.is_empty() {
+                items.clear();
+                state_truncated = true;
+            }
         }
     }
-    set_flag(value, "/database/cursorState", "truncated");
+    if state_truncated {
+        set_flag(value, "/database/cursorState", "truncated");
+    }
 
     clip_json_strings(value, 300);
 }
@@ -684,6 +719,12 @@ mod tests {
             .lines
             .iter()
             .any(|line| line.contains("captured line")));
+        assert_eq!(report.timeline.len(), 1);
+        assert_eq!(report.timeline[0]["event"], "captured");
+        assert!(report.timeline[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("database is locked"));
         assert!(!report.database.cursor_state.exists);
     }
 
@@ -699,6 +740,8 @@ mod tests {
         assert!(parsed["context"].get("conversationId").is_none());
         assert_eq!(parsed["errorCode"], "CB-SYNC-001");
         assert_eq!(parsed["severity"], "error");
+        assert_eq!(parsed["app"]["channel"], "release");
+        assert_eq!(parsed["cursor"]["installKind"], "unknown");
     }
 
     #[test]
@@ -737,6 +780,7 @@ mod tests {
                 |index| serde_json::json!({"callId": format!("call-{index}"), "durationMs": index}),
             )
             .collect();
+        database.cursor_state.catalog_ids = (0..30).map(|index| format!("id-{index}")).collect();
         report.database = database;
 
         let mut value = report_to_value(&report, None);
@@ -747,6 +791,42 @@ mod tests {
         assert_eq!(value["database"]["cursorState"]["truncated"], true);
         // Compaction must still produce valid JSON.
         serde_json::from_str::<Value>(&serde_json::to_string(&value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn compact_does_not_mark_untouched_sections_as_truncated() {
+        let mut value = report_to_value(&test_report(DiagnosticCode::Sync), None);
+        compact_report_value(&mut value);
+        assert_ne!(value["logs"]["truncated"], true);
+        assert_ne!(value["database"]["cursorState"]["truncated"], true);
+        assert!(value.get("timelineTruncated").is_none());
+        assert!(value["database"]["cursorByok"]
+            .get("llmCallsTruncated")
+            .is_none());
+    }
+
+    #[test]
+    fn timeline_is_capped_at_twenty_and_marked_truncated() {
+        let mut report = test_report(DiagnosticCode::Sync);
+        report.timeline = (0..25)
+            .map(|index| {
+                serde_json::json!({"at": "2026-11-11T12:34:56Z", "event": format!("e{index}")})
+            })
+            .collect();
+        let json = diagnostic_json_for_issue(&report, ISSUE_DIAGNOSTIC_JSON_LIMIT).unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        let timeline = parsed["timeline"].as_array().unwrap();
+        assert_eq!(timeline.len(), MAX_TIMELINE_ENTRIES);
+        assert_eq!(timeline.last().unwrap()["event"], "e24");
+        assert_eq!(parsed["timelineTruncated"], true);
+    }
+
+    #[test]
+    fn short_timeline_is_not_marked_truncated() {
+        let report = test_report_with_logs(1);
+        let json = diagnostic_json_for_issue(&report, ISSUE_DIAGNOSTIC_JSON_LIMIT).unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("timelineTruncated").is_none());
     }
 
     #[test]
