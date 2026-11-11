@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::{
+    diagnostics::DiagnosticsHub,
     local_app::CursorHarness,
     model::{
         resolve_default_model_id, ContentPart, CursorRunTraceArtifact, CursorRunTraceSummary,
@@ -35,6 +36,7 @@ pub struct ControlService {
     provider: Arc<dyn Provider>,
     clients: crate::network::NetworkClients,
     model_tests: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
+    diagnostics: Arc<std::sync::OnceLock<Arc<DiagnosticsHub>>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -151,7 +153,21 @@ impl ControlService {
             provider,
             clients,
             model_tests: Arc::new(Mutex::new(BTreeMap::new())),
+            diagnostics: Arc::new(std::sync::OnceLock::new()),
         })
+    }
+
+    /// Attaches the process-wide diagnostics hub after construction so
+    /// existing constructor call sites and tests keep compiling.
+    pub(crate) fn set_diagnostics(&self, hub: Arc<DiagnosticsHub>) {
+        if self.diagnostics.set(hub).is_err() {
+            tracing::debug!("control service diagnostics hub already set");
+        }
+    }
+
+    #[allow(dead_code)] // Used by the diagnostics API surface added in a later task.
+    pub(crate) fn diagnostics(&self) -> Option<&Arc<DiagnosticsHub>> {
+        self.diagnostics.get()
     }
 
     pub fn cursor_harness(&self) -> &CursorHarness {

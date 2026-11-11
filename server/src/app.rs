@@ -12,6 +12,7 @@ use crate::{
         prompting::{PromptAssets, PromptCompiler},
         transport::TransportRegistry,
     },
+    diagnostics::{DiagnosticsConfig, DiagnosticsHub},
     local_app::CursorHarness,
     provider::ProviderRouter,
     search::WebCache,
@@ -30,6 +31,26 @@ pub struct App {
 impl App {
     pub async fn new(mut config: Config) -> Result<Self> {
         let store = Store::connect(&config.database_url).await?;
+        let diagnostics_config = DiagnosticsConfig {
+            data_dir: crate::config::managed_data_dir()?.join("diagnostics"),
+            app_version: config.app_version.clone(),
+            upload_url: normalize_upload_url(
+                std::env::var("CURSOR_DIAGNOSTICS_UPLOAD_URL")
+                    .ok()
+                    .or_else(|| option_env!("CURSOR_DIAGNOSTICS_UPLOAD_URL").map(str::to_owned)),
+            ),
+            github_repository: std::env::var("CURSOR_DIAGNOSTICS_GITHUB_REPOSITORY")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "ApexGP/cursor-byok".to_string()),
+            enabled: true,
+            retention_days: 7,
+            max_events: 200,
+            log_window: Duration::from_secs(120),
+        };
+        let diagnostics = DiagnosticsHub::new(diagnostics_config, store.clone()).await?;
+        DiagnosticsHub::install_global(diagnostics.clone());
         if config.use_persisted_ports {
             config
                 .listen_addr
@@ -52,6 +73,7 @@ impl App {
             crate::config::managed_data_dir()?.join("rules"),
         );
         let control = control::ControlService::new(store.clone(), provider, clients.clone())?;
+        control.set_diagnostics(diagnostics);
         // Desktop startup syncs the catalog from `CursorHarness::restore()`
         // after the listener is bound, so it always uses the actual service
         // port. Skipping the pre-bind sync avoids writing a stale URL twice.
@@ -152,6 +174,12 @@ impl App {
     }
 }
 
+/// Normalizes a diagnostics upload URL: blank values disable uploads.
+fn normalize_upload_url(raw: Option<String>) -> Option<String> {
+    raw.map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 async fn bind_service_listener(
     requested: SocketAddr,
     allow_random_fallback: bool,
@@ -181,4 +209,26 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
     tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_upload_url;
+
+    #[test]
+    fn blank_upload_url_is_disabled() {
+        assert_eq!(normalize_upload_url(None), None);
+        assert_eq!(normalize_upload_url(Some(String::new())), None);
+        assert_eq!(normalize_upload_url(Some("   \n\t".to_string())), None);
+    }
+
+    #[test]
+    fn upload_url_is_trimmed() {
+        assert_eq!(
+            normalize_upload_url(Some(
+                "  https://example.com/diagnostics/upload \n".to_string()
+            )),
+            Some("https://example.com/diagnostics/upload".to_string())
+        );
+    }
 }
