@@ -4,12 +4,12 @@
 //! [`Redactor`] before it can reach a report. Query failures never abort report
 //! generation: they are surfaced through `db_unavailable`/`error`.
 
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{Row, SqlitePool};
+use sqlx::{sqlite::SqliteConnectOptions, Connection, Row, SqliteConnection};
 
 use crate::{
     diagnostics::{event::DiagnosticContext, redact::Redactor},
@@ -50,7 +50,7 @@ pub struct DatabaseEvidence {
 }
 
 /// Allowlisted evidence from `cursor-byok.db`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CursorByokEvidence {
     pub schema_version: Option<i64>,
@@ -103,45 +103,53 @@ async fn collect_cursor_byok_evidence(
     context: &DiagnosticContext,
 ) -> CursorByokEvidence {
     let redactor = Redactor::new();
-    let pool = &store.pool;
+    let mut connection = match open_cursor_byok_read_only(&store.database_path).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            return CursorByokEvidence {
+                db_unavailable: Some(redactor.redact(&format!("open read-only database: {error}"))),
+                ..CursorByokEvidence::default()
+            };
+        }
+    };
     let mut errors = Vec::new();
 
-    let schema_version = match collect_schema_version(pool).await {
+    let schema_version = match collect_schema_version(&mut connection).await {
         Ok(version) => version,
         Err(error) => {
             push_error(&mut errors, "schema version", error);
             None
         }
     };
-    let migrations = match collect_migrations(pool, &redactor).await {
+    let migrations = match collect_migrations(&mut connection, &redactor).await {
         Ok(migrations) => migrations,
         Err(error) => {
             push_error(&mut errors, "migrations", error);
             Vec::new()
         }
     };
-    let file = match collect_file_stats(pool, &redactor).await {
+    let file = match collect_file_stats(&mut connection, &redactor).await {
         Ok(file) => file,
         Err(error) => {
             push_error(&mut errors, "file stats", error);
             FileStats::default()
         }
     };
-    let settings = match collect_settings(pool, &redactor).await {
+    let settings = match collect_settings(&mut connection, &redactor).await {
         Ok(settings) => settings,
         Err(error) => {
             push_error(&mut errors, "settings", error);
             json!({})
         }
     };
-    let models = match collect_models(pool, &redactor).await {
+    let models = match collect_models(&mut connection, &redactor).await {
         Ok(models) => models,
         Err(error) => {
             push_error(&mut errors, "model configs", error);
             Vec::new()
         }
     };
-    let selected_run = match collect_run(pool, context, &redactor).await {
+    let selected_run = match collect_run(&mut connection, context, &redactor).await {
         Ok(run) => run,
         Err(error) => {
             push_error(&mut errors, "run", error);
@@ -155,7 +163,7 @@ async fn collect_cursor_byok_evidence(
 
     let mut run = selected_run.as_ref().map(|run| run.value.clone());
     if let Some(selected) = &selected_run {
-        match collect_tool_rounds(pool, &selected.run_id, &redactor).await {
+        match collect_tool_rounds(&mut connection, &selected.run_id, &redactor).await {
             Ok(rounds) => {
                 if let Some(value) = run.as_mut() {
                     value["toolRounds"] = Value::Array(rounds);
@@ -166,7 +174,7 @@ async fn collect_cursor_byok_evidence(
     }
 
     let llm_calls = match collect_llm_calls(
-        pool,
+        &mut connection,
         selected_run.as_ref().map(|run| run.run_id.as_str()),
         &redactor,
     )
@@ -178,14 +186,15 @@ async fn collect_cursor_byok_evidence(
             Vec::new()
         }
     };
-    let messages = match collect_message_roles(pool, conversation_id.as_deref(), &redactor).await {
-        Ok(messages) => messages,
-        Err(error) => {
-            push_error(&mut errors, "messages", error);
-            json!({})
-        }
-    };
-    let checkpoints = match collect_checkpoints(pool, conversation_id.as_deref()).await {
+    let messages =
+        match collect_message_roles(&mut connection, conversation_id.as_deref(), &redactor).await {
+            Ok(messages) => messages,
+            Err(error) => {
+                push_error(&mut errors, "messages", error);
+                json!({})
+            }
+        };
+    let checkpoints = match collect_checkpoints(&mut connection, conversation_id.as_deref()).await {
         Ok(checkpoints) => checkpoints,
         Err(error) => {
             push_error(&mut errors, "checkpoints", error);
@@ -208,24 +217,40 @@ async fn collect_cursor_byok_evidence(
     }
 }
 
+/// Opens a dedicated read-only connection for diagnostic evidence collection.
+///
+/// This intentionally does not use the shared write pool: diagnostics must not
+/// wait on application writes, and the design forbids mutating the database.
+async fn open_cursor_byok_read_only(path: &Path) -> Result<SqliteConnection, sqlx::Error> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .create_if_missing(false)
+        .busy_timeout(Duration::from_secs(1))
+        .pragma("query_only", "true");
+    SqliteConnection::connect_with(&options).await
+}
+
 fn push_error(errors: &mut Vec<String>, label: &str, error: sqlx::Error) {
     errors.push(format!("{label}: {error}"));
 }
 
-async fn collect_schema_version(pool: &SqlitePool) -> Result<Option<i64>, sqlx::Error> {
+async fn collect_schema_version(
+    connection: &mut SqliteConnection,
+) -> Result<Option<i64>, sqlx::Error> {
     sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success = 1")
-        .fetch_one(pool)
+        .fetch_one(&mut *connection)
         .await
 }
 
 async fn collect_migrations(
-    pool: &SqlitePool,
+    connection: &mut SqliteConnection,
     redactor: &Redactor,
 ) -> Result<Vec<Value>, sqlx::Error> {
     let rows = sqlx::query(&format!(
         "SELECT {MIGRATION_COLUMNS} FROM _sqlx_migrations ORDER BY version"
     ))
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     let mut migrations = Vec::with_capacity(rows.len());
     for row in rows {
@@ -239,11 +264,13 @@ async fn collect_migrations(
 }
 
 async fn collect_file_stats(
-    pool: &SqlitePool,
+    connection: &mut SqliteConnection,
     redactor: &Redactor,
 ) -> Result<FileStats, sqlx::Error> {
     let mut stats = FileStats::default();
-    let rows = sqlx::query("PRAGMA database_list").fetch_all(pool).await?;
+    let rows = sqlx::query("PRAGMA database_list")
+        .fetch_all(&mut *connection)
+        .await?;
     if let Some(row) = rows.iter().find(|row| {
         row.try_get::<String, _>("name")
             .is_ok_and(|name| name == "main")
@@ -266,26 +293,29 @@ async fn collect_file_stats(
         }
     }
     stats.page_count = sqlx::query_scalar("PRAGMA page_count")
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await?;
     stats.freelist_pages = sqlx::query_scalar("PRAGMA freelist_count")
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await?;
     stats.journal_mode = sqlx::query_scalar::<_, String>("PRAGMA journal_mode")
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await?
         .map(|mode| redactor.redact(&mode));
     Ok(stats)
 }
 
-async fn collect_settings(pool: &SqlitePool, redactor: &Redactor) -> Result<Value, sqlx::Error> {
+async fn collect_settings(
+    connection: &mut SqliteConnection,
+    redactor: &Redactor,
+) -> Result<Value, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT setting_key, value_json FROM service_settings WHERE setting_key IN (
             'cursor_takeover_enabled', 'default_model', 'llm_detailed_logging',
             'commit_settings', 'outbound_proxy', 'cursor_tab'
          )",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     let mut settings = Map::new();
@@ -349,12 +379,15 @@ async fn collect_settings(pool: &SqlitePool, redactor: &Redactor) -> Result<Valu
     Ok(Value::Object(settings))
 }
 
-async fn collect_models(pool: &SqlitePool, redactor: &Redactor) -> Result<Vec<Value>, sqlx::Error> {
+async fn collect_models(
+    connection: &mut SqliteConnection,
+    redactor: &Redactor,
+) -> Result<Vec<Value>, sqlx::Error> {
     let rows = sqlx::query(&format!(
         "SELECT {MODEL_COLUMNS} FROM model_configs ORDER BY sort_order, display_name LIMIT ?"
     ))
     .bind(EVIDENCE_LIMIT as i64)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     let mut models = Vec::with_capacity(rows.len());
@@ -404,14 +437,14 @@ struct SelectedRun {
 }
 
 async fn collect_run(
-    pool: &SqlitePool,
+    connection: &mut SqliteConnection,
     context: &DiagnosticContext,
     redactor: &Redactor,
 ) -> Result<Option<SelectedRun>, sqlx::Error> {
     let row = if let Some(run_id) = context.run_id.as_deref() {
         sqlx::query(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE run_id = ?"))
             .bind(run_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *connection)
             .await?
     } else if let Some(conversation_id) = context.conversation_id.as_deref() {
         sqlx::query(&format!(
@@ -419,7 +452,7 @@ async fn collect_run(
              ORDER BY updated_at_ms DESC LIMIT 1"
         ))
         .bind(conversation_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await?
     } else {
         sqlx::query(&format!(
@@ -427,7 +460,7 @@ async fn collect_run(
              ORDER BY updated_at_ms DESC LIMIT 1"
         ))
         .bind(now_ms() - RUN_LOOKBACK_MS)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await?
     };
 
@@ -461,7 +494,7 @@ async fn collect_run(
 }
 
 async fn collect_tool_rounds(
-    pool: &SqlitePool,
+    connection: &mut SqliteConnection,
     run_id: &str,
     redactor: &Redactor,
 ) -> Result<Vec<Value>, sqlx::Error> {
@@ -471,7 +504,7 @@ async fn collect_tool_rounds(
     ))
     .bind(run_id)
     .bind(EVIDENCE_LIMIT as i64)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     let mut rounds = Vec::with_capacity(rows.len());
@@ -483,7 +516,7 @@ async fn collect_tool_rounds(
         ))
         .bind(&round_id)
         .bind(EVIDENCE_LIMIT as i64)
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
         let calls = calls
             .into_iter()
@@ -513,7 +546,7 @@ async fn collect_tool_rounds(
 }
 
 async fn collect_llm_calls(
-    pool: &SqlitePool,
+    connection: &mut SqliteConnection,
     run_id: Option<&str>,
     redactor: &Redactor,
 ) -> Result<Vec<Value>, sqlx::Error> {
@@ -524,7 +557,7 @@ async fn collect_llm_calls(
         ))
         .bind(run_id)
         .bind(EVIDENCE_LIMIT as i64)
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?
     } else {
         sqlx::query(&format!(
@@ -534,7 +567,7 @@ async fn collect_llm_calls(
         ))
         .bind(now_ms() - RUN_LOOKBACK_MS)
         .bind(EVIDENCE_LIMIT as i64)
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?
     };
 
@@ -594,7 +627,7 @@ async fn collect_llm_calls(
 }
 
 async fn collect_message_roles(
-    pool: &SqlitePool,
+    connection: &mut SqliteConnection,
     conversation_id: Option<&str>,
     redactor: &Redactor,
 ) -> Result<Value, sqlx::Error> {
@@ -605,7 +638,7 @@ async fn collect_message_roles(
         "SELECT role, COUNT(*) AS count FROM messages WHERE conversation_id = ? GROUP BY role",
     )
     .bind(conversation_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     let mut counts = Map::new();
     for row in rows {
@@ -616,7 +649,7 @@ async fn collect_message_roles(
 }
 
 async fn collect_checkpoints(
-    pool: &SqlitePool,
+    connection: &mut SqliteConnection,
     conversation_id: Option<&str>,
 ) -> Result<Value, sqlx::Error> {
     let Some(conversation_id) = conversation_id else {
@@ -628,7 +661,7 @@ async fn collect_checkpoints(
          WHERE conversation_id = ?",
     )
     .bind(conversation_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
     Ok(json!({
         "count": row.try_get::<i64, _>("count")?,
@@ -688,6 +721,21 @@ mod tests {
             "INSERT INTO llm_call_requests(call_id, headers_json, body_json, byte_count)
              VALUES ('llm-1', '{\"authorization\":\"Bearer REQUEST-BODY-SENTINEL\"}',
                 '{\"messages\":[{\"content\":\"REQUEST-BODY-SENTINEL\"}]}', 64)",
+            "INSERT INTO llm_call_response_chunks(call_id, seq, received_offset_ms, data, byte_count)
+             VALUES ('llm-1', 0, 5, CAST('RESPONSE-CHUNK-SENTINEL' AS BLOB), 22)",
+            "INSERT INTO cursor_run_traces(request_id, conversation_id, route, model_id, status,
+                request_bytes, response_bytes, response_event_count, http_status, received_at_ms,
+                error_message)
+             VALUES ('trace-1', 'conv-1', 'local_byok', 'test-model', 'failed', 1, 2, 3, 500,
+                1763000000000, 'TRACE-ERROR-SENTINEL')",
+            "INSERT INTO blobs(blob_id, data, created_at_ms)
+             VALUES (X'0000000000000000000000000000000000000000000000000000000000000001',
+                CAST('TRACE-ARTIFACT-SENTINEL' AS BLOB), 1763000000000)",
+            "INSERT INTO cursor_run_trace_artifacts(request_id, seq, artifact_type, source, blob_id,
+                metadata_json, created_at_ms)
+             VALUES ('trace-1', 0, 'raw', 'cursor_client',
+                X'0000000000000000000000000000000000000000000000000000000000000001',
+                '{\"payload\":\"TRACE-ARTIFACT-METADATA-SENTINEL\"}', 1763000000000)",
             "INSERT INTO messages(conversation_id, message_id, role, origin, payload_json, created_at_ms)
              VALUES ('conv-1', 'msg-1', 'user', 'user', 'MESSAGE-SENTINEL', 1763000000000)",
             "INSERT INTO messages(conversation_id, message_id, role, origin, payload_json, created_at_ms)
@@ -751,6 +799,10 @@ mod tests {
             "PROXY-USER-SENTINEL",
             "PROXY-PASS-SENTINEL",
             "TAB-SENTINEL",
+            "RESPONSE-CHUNK-SENTINEL",
+            "TRACE-ARTIFACT-SENTINEL",
+            "TRACE-ARTIFACT-METADATA-SENTINEL",
+            "TRACE-ERROR-SENTINEL",
             "alice",
         ] {
             assert!(!json.contains(secret), "leaked {secret}: {json}");
@@ -805,15 +857,43 @@ mod tests {
     #[tokio::test]
     async fn unavailable_database_is_structured_and_not_fatal() {
         let temp = tempfile::tempdir().unwrap();
-        let store = seeded_store_with_secrets(&temp).await;
-        store.pool.close().await;
+        let mut store = seeded_store_with_secrets(&temp).await;
+        // The shared pool still points at a valid database; diagnostics must
+        // not fall back to it when the read-only open fails.
+        store.database_path = temp.path().join("missing").join("cursor-byok.db");
         let state_db = temp.path().join("missing").join("state.vscdb");
 
         let evidence = collect_database_evidence(&store, &sync_context("run-1"), &state_db).await;
 
-        assert!(evidence.cursor_byok.db_unavailable.is_some());
+        let unavailable = evidence.cursor_byok.db_unavailable.unwrap();
+        assert!(unavailable.contains("open read-only database"));
+        assert!(evidence.cursor_byok.schema_version.is_none());
+        assert!(evidence.cursor_byok.models.is_empty());
         assert!(!evidence.cursor_state.exists);
         assert!(evidence.cursor_state.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn diagnostics_connection_is_read_only_and_query_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_store_with_secrets(&temp).await;
+
+        let mut connection = open_cursor_byok_read_only(&store.database_path)
+            .await
+            .unwrap();
+
+        let query_only: i64 = sqlx::query_scalar("PRAGMA query_only")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(query_only, 1);
+
+        let write = sqlx::query(
+            "INSERT INTO service_settings(setting_key, value_json, updated_at_ms) VALUES ('probe', 'true', 0)",
+        )
+        .execute(&mut connection)
+        .await;
+        assert!(write.is_err(), "diagnostics connection must not write");
     }
 
     #[test]

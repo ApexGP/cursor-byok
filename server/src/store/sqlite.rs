@@ -1,5 +1,5 @@
 //! Initializes and configures SQLite storage.
-use std::{str::FromStr, time::Duration};
+use std::{path::PathBuf, str::FromStr, time::Duration};
 
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
@@ -14,6 +14,8 @@ use super::{migrations, writer::WriteCoordinator};
 pub struct Store {
     pub(crate) pool: SqlitePool,
     pub(crate) writes: WriteCoordinator,
+    /// On-disk path used by diagnostics to open a dedicated read-only connection.
+    pub(crate) database_path: PathBuf,
 }
 
 impl Store {
@@ -33,6 +35,7 @@ impl Store {
         Ok(Self {
             pool,
             writes: WriteCoordinator::default(),
+            database_path,
         })
     }
 
