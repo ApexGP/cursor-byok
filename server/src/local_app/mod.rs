@@ -30,6 +30,12 @@ pub(crate) fn proxy_host_allowed(host: &str) -> bool {
     proxy::is_managed_host(host)
 }
 
+/// Returns Cursor's `state.vscdb` path for read-only diagnostic evidence.
+#[allow(dead_code)] // Report assembly (Task 5+) wires this into the collector.
+pub(crate) fn cursor_state_db_path() -> Result<std::path::PathBuf> {
+    account::state_db_path()
+}
+
 pub(crate) fn request_uses_local_cursor_token(headers: &axum::http::HeaderMap) -> bool {
     headers
         .get(axum::http::header::AUTHORIZATION)
