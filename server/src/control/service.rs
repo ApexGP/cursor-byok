@@ -159,7 +159,7 @@ impl ControlService {
 
     /// Attaches the process-wide diagnostics hub after construction so
     /// existing constructor call sites and tests keep compiling.
-    pub(crate) fn set_diagnostics(&self, hub: Arc<DiagnosticsHub>) {
+    pub fn set_diagnostics(&self, hub: Arc<DiagnosticsHub>) {
         if self.diagnostics.set(hub).is_err() {
             tracing::debug!("control service diagnostics hub already set");
         }
