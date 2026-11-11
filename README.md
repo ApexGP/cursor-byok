@@ -105,6 +105,13 @@ After changing TAB settings, restart Cursor and open a new conversation so the n
 - Plugins, codebase indexing, and other Cursor features continue to work.
 - API keys, model configuration, and application settings are stored locally. Model requests are still sent to the upstream provider you choose; follow that provider's privacy and billing terms.
 
+## Diagnostics and Privacy
+
+- Terminal failures are captured locally and shown through **Issues detected**. Nothing is uploaded until you click **Upload and create Issue**.
+- The app uploads a redacted diagnostic bundle, opens a prefilled GitHub issue, and keeps no bundle locally. If you do not submit the issue, the server deletes the bundle after 30 days.
+- Reports exclude API keys, Authorization headers, message contents, request/response bodies, and full databases. Database evidence is limited to an allowlist of diagnostic fields.
+- The GitHub issue body uses a fixed template with a machine-readable JSON block so maintainers and agents can parse it with `gh`.
+
 ## How It Works and Data Privacy
 
 ```text
