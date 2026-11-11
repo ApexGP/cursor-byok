@@ -31,7 +31,6 @@ pub(crate) fn proxy_host_allowed(host: &str) -> bool {
 }
 
 /// Returns Cursor's `state.vscdb` path for read-only diagnostic evidence.
-#[allow(dead_code)] // Report assembly (Task 5+) wires this into the collector.
 pub(crate) fn cursor_state_db_path() -> Result<std::path::PathBuf> {
     account::state_db_path()
 }

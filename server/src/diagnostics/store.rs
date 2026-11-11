@@ -48,6 +48,8 @@ pub struct DiagnosticsConfig {
     pub max_events: usize,
     pub log_window: Duration,
     pub data_dir: PathBuf,
+    /// Desktop application version shown in reports and issue templates.
+    pub app_version: String,
 }
 
 /// A deduplicated report exposed to the control plane.
@@ -356,9 +358,13 @@ impl DiagnosticsHub {
     }
 
     /// Used by report assembly to collect database evidence.
-    #[allow(dead_code)]
     pub(crate) fn database_store(&self) -> &Store {
         &self.inner.database_store
+    }
+
+    /// Used by report assembly for environment and log-window settings.
+    pub(crate) fn config(&self) -> &DiagnosticsConfig {
+        &self.inner.config
     }
 
     fn enqueue(&self, command: Command) {
@@ -772,6 +778,7 @@ mod tests {
             max_events: 200,
             log_window: Duration::from_secs(20),
             data_dir: temp.path().join("diagnostics"),
+            app_version: "1.0.6".to_string(),
         }
     }
 
