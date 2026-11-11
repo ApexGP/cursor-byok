@@ -180,6 +180,9 @@ struct Inner {
     database_store: Store,
     state: Mutex<State>,
     writer: mpsc::Sender<Command>,
+    /// Test-only gate used to force a scheduling window at enqueue time.
+    #[cfg(test)]
+    enqueue_hook: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 /// Owns the in-memory report index and the background persistence writer.
@@ -218,6 +221,8 @@ impl DiagnosticsHub {
             database_store: store,
             state: Mutex::new(state),
             writer,
+            #[cfg(test)]
+            enqueue_hook: Mutex::new(None),
         });
 
         let writer_dir = config.data_dir.clone();
@@ -243,10 +248,11 @@ impl DiagnosticsHub {
     fn record_at(&self, mut event: DiagnosticEvent, now: DateTime<Utc>) {
         event.captured_at = now;
         let event = redact_event(&Redactor::new(), event);
-        let snapshot = {
-            let mut state = self.inner.state.lock();
-            apply_event(&mut state, &self.inner.config, event, now)
-        };
+        // Enqueue while the state lock is still held. The writer never takes
+        // this lock, so this keeps aggregate snapshots in state-update order:
+        // a stale snapshot can never be enqueued after a newer one.
+        let mut state = self.inner.state.lock();
+        let snapshot = apply_event(&mut state, &self.inner.config, event, now);
         self.enqueue(Command::Write(Box::new(snapshot)));
     }
 
@@ -356,6 +362,15 @@ impl DiagnosticsHub {
     }
 
     fn enqueue(&self, command: Command) {
+        #[cfg(test)]
+        let hook = self.inner.enqueue_hook.lock().take();
+        #[cfg(test)]
+        if let Some(notify) = hook {
+            let _ = notify.send(());
+            // Holding the state lock here must block other records until the
+            // snapshot has been sent; otherwise a newer snapshot can overtake.
+            std::thread::sleep(Duration::from_millis(50));
+        }
         match self.inner.writer.try_send(command) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
@@ -922,6 +937,44 @@ mod tests {
 
         let hub = DiagnosticsHub::new(config, store).await.unwrap();
         let reports = hub.reports().await;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].occurrences, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_records_never_leave_an_older_snapshot_on_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(&temp);
+        let store = test_store().await;
+        let hub = DiagnosticsHub::new(config.clone(), store.clone())
+            .await
+            .unwrap();
+
+        // Pause the first record inside `enqueue`. With the fix this happens
+        // while the state lock is held, so the second record cannot overtake
+        // it. If enqueue ever moves outside the lock, the second record will
+        // persist count=2 first and the stale count=1 snapshot will overwrite
+        // it on disk.
+        let (notify, reached) = std::sync::mpsc::channel();
+        *hub.inner.enqueue_hook.lock() = Some(notify);
+
+        let first_hub = hub.clone();
+        let first = std::thread::spawn(move || first_hub.record(sync_event("database is locked")));
+        reached
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first record must reach enqueue");
+        let second_hub = hub.clone();
+        let second =
+            std::thread::spawn(move || second_hub.record(sync_event("database is locked")));
+        first.join().unwrap();
+        second.join().unwrap();
+
+        hub.flush().await;
+        assert_eq!(hub.reports().await[0].occurrences, 2);
+        drop(hub);
+
+        let reloaded = DiagnosticsHub::new(config, store).await.unwrap();
+        let reports = reloaded.reports().await;
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].occurrences, 2);
     }
