@@ -8,32 +8,66 @@ import { AppLayout } from "./shell/AppLayout";
 import { CallsPage } from "./features/calls/CallsPage";
 import { CallDetailsPage } from "./features/calls/CallDetailsPage";
 import { CursorSettingsPage } from "./features/models/CursorSettingsPage";
+import { DiagnosticsButton } from "./features/diagnostics/DiagnosticsButton";
+import { DiagnosticsErrorBoundary } from "./features/diagnostics/DiagnosticsErrorBoundary";
 import { HomePage } from "./features/home/HomePage";
 import { SettingsPage } from "./features/settings/SettingsPage";
+import { diagnosticsStore } from "./shared/diagnostics/store";
 import { useAppStore } from "./shared/store/appStore";
 import { updateStore } from "./shared/store/updateStore";
 
 const AUTO_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 
 export function App() {
+  useEffect(() => {
+    diagnosticsStore.startPolling();
+    let lastMessage = "";
+    let lastReportedAt = 0;
+    const report = (message: string, stack?: string) => {
+      const now = Date.now();
+      if (message === lastMessage && now - lastReportedAt < 60_000) return;
+      lastMessage = message;
+      lastReportedAt = now;
+      diagnosticsStore.reportRendererError({ code: "CB-UI-002", message, stack });
+    };
+    const onError = (event: ErrorEvent) => report(event.message, event.error?.stack);
+    const onRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      report(
+        reason instanceof Error ? reason.message : String(reason),
+        reason instanceof Error ? reason.stack : undefined,
+      );
+    };
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      diagnosticsStore.stopPolling();
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
+  }, []);
+
   return (
-    <TooltipProvider>
-      <HashRouter>
-        <Routes>
-          <Route path="calls/:callId" element={<CallDetailsPage />} />
-          <Route element={<AppFrame />}>
-            <Route element={<AppLayout />}>
-              <Route index element={<HomePage />} />
-              <Route path="calls" element={<CallsPage />} />
-              <Route path="harness/cursor" element={<CursorSettingsPage />} />
-              <Route path="settings" element={<SettingsPage />} />
+    <DiagnosticsErrorBoundary>
+      <TooltipProvider>
+        <HashRouter>
+          <Routes>
+            <Route path="calls/:callId" element={<CallDetailsPage />} />
+            <Route element={<AppFrame />}>
+              <Route element={<AppLayout />}>
+                <Route index element={<HomePage />} />
+                <Route path="calls" element={<CallsPage />} />
+                <Route path="harness/cursor" element={<CursorSettingsPage />} />
+                <Route path="settings" element={<SettingsPage />} />
+              </Route>
+              <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Route>
-        </Routes>
-      </HashRouter>
-      <AppMessages />
-    </TooltipProvider>
+          </Routes>
+        </HashRouter>
+        <DiagnosticsButton />
+        <AppMessages />
+      </TooltipProvider>
+    </DiagnosticsErrorBoundary>
   );
 }
 

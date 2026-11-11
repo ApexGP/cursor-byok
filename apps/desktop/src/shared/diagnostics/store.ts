@@ -117,6 +117,7 @@ export const diagnosticsStore = {
   loadReport,
   createIssue,
   dismiss,
+  reportRendererError,
   startPolling,
   stopPolling,
 };

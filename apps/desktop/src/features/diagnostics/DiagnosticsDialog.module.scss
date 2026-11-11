@@ -1,0 +1,103 @@
+@use "../../styles/typography" as type;
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  gap: 12px;
+  min-height: 320px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 480px;
+  overflow: auto;
+}
+
+.item {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover,
+  &.selected {
+    background: var(--vscode-list-hoverBackground);
+  }
+}
+
+.code {
+  color: var(--vscode-errorForeground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: type.$font-size-xs;
+}
+
+.summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta {
+  color: var(--vscode-descriptionForeground);
+  font-size: type.$font-size-xs;
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.notice,
+.error,
+.empty,
+.uploading {
+  color: var(--vscode-descriptionForeground);
+  font-size: type.$font-size-xs;
+}
+
+.error {
+  color: var(--vscode-errorForeground);
+}
+
+.preview,
+.json pre {
+  max-height: 360px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-textCodeBlock-background);
+  color: var(--vscode-editor-foreground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: type.$font-size-xs;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.json summary {
+  cursor: pointer;
+  color: var(--vscode-textLink-foreground);
+  font-size: type.$font-size-xs;
+}
+
+.dismiss {
+  margin-right: auto;
+  border: 0;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+
+  &:hover {
+    color: var(--vscode-foreground);
+  }
+}

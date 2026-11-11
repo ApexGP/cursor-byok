@@ -141,6 +141,49 @@ export function installDemoApi() {
     if (path === "/overview") return json(createOverview(url.searchParams));
     if (path === "/llm-calls") return json(calls);
     if (path.startsWith("/llm-calls/")) return json(createCallDetail(path.slice("/llm-calls/".length)));
+    if (path === "/diagnostics/reports") {
+      return json([{
+        reportId: "r-20261111-0123456789abcdef0123456789abcdef",
+        code: "CB-SYNC-001",
+        severity: "error",
+        summary: "Cursor model cache sync failed: database is locked",
+        occurrences: 2,
+        firstSeen: new Date(FIXED_NOW - 60_000).toISOString(),
+        lastSeen: new Date(FIXED_NOW).toISOString(),
+        dismissed: false,
+      }]);
+    }
+    if (path === "/diagnostics/reports/r-20261111-0123456789abcdef0123456789abcdef") {
+      return json({
+        summary: {
+          reportId: "r-20261111-0123456789abcdef0123456789abcdef",
+          code: "CB-SYNC-001",
+          severity: "error",
+          summary: "Cursor model cache sync failed: database is locked",
+          occurrences: 2,
+          firstSeen: new Date(FIXED_NOW - 60_000).toISOString(),
+          lastSeen: new Date(FIXED_NOW).toISOString(),
+          dismissed: false,
+        },
+        issueBody: "## 概要\nCursor model cache sync failed: database is locked\n\n<!-- CURSOR_BYOK_DIAGNOSTIC_START -->\n```json\n{\"schemaVersion\":1,\"errorCode\":\"CB-SYNC-001\"}\n```\n<!-- CURSOR_BYOK_DIAGNOSTIC_END -->",
+        diagnosticJson: { schemaVersion: 1, errorCode: "CB-SYNC-001" },
+        uploadAvailable: true,
+      });
+    }
+    if (path === "/diagnostics/reports/r-20261111-0123456789abcdef0123456789abcdef/issue") {
+      return json({
+        title: "[CB-SYNC-001] Cursor model cache sync failed",
+        body: "Demo issue body",
+        labels: ["diagnostics", "auto-report"],
+        issueUrl: "https://github.com/ApexGP/cursor-byok/issues/new?title=demo",
+        bundleUrl: "https://diag.example/r/demo",
+        expiresAt: new Date(FIXED_NOW + 30 * 86_400_000).toISOString(),
+      });
+    }
+    if (path === "/diagnostics/reports/r-20261111-0123456789abcdef0123456789abcdef/dismiss") {
+      return empty();
+    }
+    if (path === "/diagnostics/frontend") return empty();
     if (path === "/harness/cursor/status") return json(harnessStatus);
     if (path === "/harness/cursor/ca/initialize") return json(harnessStatus);
     if (path === "/harness/cursor/restart") return json(harnessStatus);

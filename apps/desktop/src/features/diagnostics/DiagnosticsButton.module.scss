@@ -1,0 +1,41 @@
+@use "../../styles/typography" as type;
+
+.root {
+  position: fixed;
+  z-index: 11900;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 999px;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  font: inherit;
+  font-size: type.$font-size-xs;
+  cursor: pointer;
+  pointer-events: auto;
+
+  &:hover {
+    background: var(--vscode-button-secondaryHoverBackground);
+  }
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--vscode-errorForeground);
+}
+
+.count {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
