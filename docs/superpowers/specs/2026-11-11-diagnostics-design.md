@@ -375,7 +375,7 @@ X-Platform: windows
 
 约束：
 
-- 正文预填上限 6000 字符；JSON 必须保持合法，超限时先裁剪 `logs.tail`、`timeline`、数据库数组，并置 `truncated: true`。
+- 正文预填上限 1500 字节；JSON 必须保持合法，超限时先裁剪 `logs.tail`、`timeline`、数据库数组，并置 `truncated: true`。**Why**：GitHub 在预填 URL 约 7000 字符时返回 500，percent-encoding 最多把 1 个 UTF-8 字节扩成 3 个字符；完整证据仍在诊断包中。
 - 标题最多 120 字符。
 - labels：`diagnostics`、`auto-report`、`platform:<os>`、`area:<area>`、`severity:<level>`。缺失的 label 不影响正文解析。
 - agent 用 `gh issue view <n> --json title,body,labels`，取两个 marker 之间的 JSON。

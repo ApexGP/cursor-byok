@@ -210,7 +210,7 @@ pub(crate) fn issue_json(
         return Ok(json);
     }
 
-    let minimal = json!({
+    let mut minimal = json!({
         "schemaVersion": report.schema_version,
         "reportId": &report.report_id,
         "errorCode": &report.error_code,
@@ -219,6 +219,13 @@ pub(crate) fn issue_json(
         "logs": { "tail": [], "truncated": true },
         "truncated": true,
     });
+    if let Some(bundle) = bundle {
+        minimal["bundle"] = json!({
+            "url": &bundle.url,
+            "sha256": &bundle.sha256,
+            "expiresAt": timestamp(bundle.expires_at),
+        });
+    }
     json = serde_json::to_string(&minimal)?;
     if json.len() <= max_chars {
         return Ok(json);

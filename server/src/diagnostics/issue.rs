@@ -11,7 +11,12 @@ use crate::{
 };
 
 /// Maximum issue body length accepted by the template.
-pub const ISSUE_BODY_LIMIT: usize = 6000;
+///
+/// GitHub returns 500 for prefilled `issues/new` URLs around 7,000 characters,
+/// and form encoding can expand a UTF-8 byte to three characters. 1,500 bytes
+/// keeps the encoded URL (body + title + labels) below that limit while the
+/// full evidence remains in the uploaded bundle.
+pub const ISSUE_BODY_LIMIT: usize = 1500;
 /// Maximum title length.
 pub const ISSUE_TITLE_LIMIT: usize = 120;
 
@@ -34,11 +39,11 @@ pub fn render_issue(
     let title = render_title(report);
     let labels = render_labels(report);
 
-    let summary = clip_bytes(first_line(&report.summary), 400);
+    let summary = clip_bytes(first_line(&report.summary), 240);
     let environment = render_environment(report);
     let happened = render_what_happened(report);
-    let bundle_slot = render_bundle_slot(bundle);
-    let redaction = render_redaction_notes(&report.redaction);
+    let bundle_slot = clip_bytes(&render_bundle_slot(bundle), 240);
+    let redaction = clip_bytes(&render_redaction_notes(&report.redaction), 140);
 
     // Measure the template with an empty JSON slot, then render it once with
     // the fitted JSON. This avoids searching template text for a placeholder
@@ -62,12 +67,37 @@ pub fn render_issue(
         &redaction,
         &diagnostic_json,
     );
+    let body = if body.len() <= ISSUE_BODY_LIMIT {
+        body
+    } else {
+        render_compact_body(report, bundle)?
+    };
 
     Ok(IssueDraft {
         title,
         body,
         labels,
     })
+}
+
+/// A URL-safe fallback when the fixed template exceeds the prefill budget.
+/// The full evidence remains in the uploaded bundle.
+fn render_compact_body(report: &DiagnosticReport, bundle: Option<&BundleLink>) -> Result<String> {
+    let summary = clip_bytes(first_line(&report.summary), 120);
+    let bundle_slot = clip_bytes(&render_bundle_slot(bundle), 160);
+    let redaction = "已脱敏并省略敏感内容。";
+    let overhead = render_template(&summary, "", "", &bundle_slot, redaction, "").len();
+    let budget = ISSUE_BODY_LIMIT.saturating_sub(overhead).max(2);
+    let diagnostic_json = crate::diagnostics::report::issue_json(report, bundle, budget)?;
+    let body = render_template(&summary, "", "", &bundle_slot, redaction, &diagnostic_json);
+    if body.len() <= ISSUE_BODY_LIMIT {
+        return Ok(body);
+    }
+    Ok(format!(
+        "<!-- cursor-byok-diagnostic:v1 -->\n## 概要\n{}\n\n## 诊断数据\n<!-- CURSOR_BYOK_DIAGNOSTIC_START -->\n```json\n{{\"schemaVersion\":1,\"errorCode\":\"{}\",\"truncated\":true}}\n```\n<!-- CURSOR_BYOK_DIAGNOSTIC_END -->\n",
+        clip_bytes(&summary, 80),
+        report.error_code,
+    ))
 }
 
 /// Builds a `https://github.com/<repo>/issues/new` URL for a rendered draft.
@@ -340,7 +370,6 @@ mod tests {
         assert!(body.contains("__CURSOR_BYOK_DIAGNOSTIC_JSON__"));
         let parsed: Value = serde_json::from_str(extract_between_markers(&body).unwrap()).unwrap();
         assert_eq!(parsed["schemaVersion"], 1);
-        assert_eq!(parsed["logs"]["truncated"], false);
         assert!(body.len() <= ISSUE_BODY_LIMIT);
     }
 
@@ -448,6 +477,27 @@ mod tests {
         assert_eq!(pairs["title"], draft.title);
         assert_eq!(pairs["body"], draft.body);
         assert_eq!(pairs["labels"], draft.labels.join(","));
+    }
+
+    #[test]
+    fn issue_url_stays_below_githubs_prefill_limit_for_unicode() {
+        let draft = IssueDraft {
+            title: format!("[CB-APP-001] {}", "🚀".repeat(120)),
+            body: "中".repeat(500),
+            labels: vec![
+                "diagnostics".into(),
+                "auto-report".into(),
+                "platform:windows".into(),
+                "area:sync".into(),
+                "severity:error".into(),
+            ],
+        };
+        let url = issue_url("ApexGP/cursor-byok", &draft);
+        assert!(
+            url.chars().count() < 6900,
+            "url is {} chars",
+            url.chars().count()
+        );
     }
 
     #[test]

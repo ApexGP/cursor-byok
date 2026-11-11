@@ -15,7 +15,7 @@
 - Issue 正文固定模板，程序只填槽；禁止自由生成正文。
 - 机器可读区必须位于 `<!-- CURSOR_BYOK_DIAGNOSTIC_START -->` 与 `<!-- CURSOR_BYOK_DIAGNOSTIC_END -->` 之间，内容为合法 JSON。
 - 标题格式 `[CB-<AREA>-<NNN>] <summary>`，标题最长 120 字符。
-- Issue 正文预填最长 6000 字符；超限必须确定性裁剪并保持 JSON 合法。
+- Issue 正文预填最长 1500 字节（GitHub 预填 URL 约 7000 字符会返回 500；percent-encoding 最多 3x）；超限必须确定性裁剪并保持 JSON 合法。
 - 采集、写入本地事件、生成 Issue、上传之前都必须脱敏。
 - 禁止输出：`api_key`、Authorization、Cookie、Token、密码、请求/响应正文、消息正文、完整 `state.vscdb`、完整 `cursor-byok.db`。
 - 数据库证据只允许设计文档第 7 节的表和字段。
@@ -351,7 +351,7 @@ git commit -m "feat(diagnostics): collect allowlisted database evidence"
 fn issue_body_keeps_markers_and_valid_json_when_truncated() {
     let report = report_with_large_logs();
     let body = render_issue(&report, None, "ApexGP/cursor-byok").unwrap().body;
-    assert!(body.len() <= 6000);
+    assert!(body.len() <= 1500);
     let json = extract_between_markers(&body).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
     assert_eq!(parsed["schemaVersion"], 1);
