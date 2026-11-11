@@ -49,7 +49,15 @@ impl App {
             max_events: 200,
             log_window: Duration::from_secs(120),
         };
+        let diagnostics_data_dir = diagnostics_config.data_dir.clone();
         let diagnostics = init_diagnostics(store.clone(), diagnostics_config).await;
+        crate::diagnostics::install_panic_hook(diagnostics_data_dir.clone());
+        if let Some(hub) = &diagnostics {
+            if let Err(error) = crate::diagnostics::recover_crash_files(hub, &diagnostics_data_dir)
+            {
+                tracing::warn!(%error, "failed to recover diagnostic crash files");
+            }
+        }
         if config.use_persisted_ports {
             config
                 .listen_addr

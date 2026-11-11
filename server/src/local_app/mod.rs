@@ -256,8 +256,15 @@ impl CursorHarness {
             return Ok(());
         }
         let service_url = self.backend_url();
-        model_cache::sync_with(&self.inner.store, service_url.as_deref()).await?;
-        Ok(())
+        let result = model_cache::sync_with(&self.inner.store, service_url.as_deref()).await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let cursor_running = process::cursor_running().await.unwrap_or(false);
+                crate::diagnostics::capture_sync_error(&error, true, cursor_running);
+                Err(error)
+            }
+        }
     }
 
     pub async fn status(&self) -> Result<CursorHarnessStatus> {
@@ -332,11 +339,18 @@ impl CursorHarness {
             .ok_or_else(|| Error::Config("desktop management server is not ready".into()))?;
         // Cursor must be stopped before patching applicationUser; otherwise its
         // in-memory state overwrites the sync and resets model visibility.
-        process::stop_cursor().await?;
+        if let Err(error) = process::stop_cursor().await {
+            crate::diagnostics::capture_process_error("stop_cursor", &error);
+            return Err(error);
+        }
         if let Err(error) = self.sync_model_cache().await {
             tracing::warn!(%error, "failed to sync Cursor model cache before restart");
         }
-        process::launch_cursor_with_backend(&service_url).await
+        if let Err(error) = process::launch_cursor_with_backend(&service_url).await {
+            crate::diagnostics::capture_process_error("launch_cursor", &error);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Refreshes Cursor after a BYOK restart when either the proxy port changed
@@ -369,11 +383,17 @@ impl CursorHarness {
                 molten_ok,
                 "restarting Cursor to apply local backend settings"
             );
-            process::stop_cursor().await?;
+            if let Err(error) = process::stop_cursor().await {
+                crate::diagnostics::capture_process_error("stop_cursor", &error);
+                return Err(error);
+            }
             if let Err(error) = self.sync_model_cache().await {
                 tracing::warn!(%error, "failed to sync Cursor model cache before restart");
             }
-            process::launch_cursor_with_backend(&service_url).await?;
+            if let Err(error) = process::launch_cursor_with_backend(&service_url).await {
+                crate::diagnostics::capture_process_error("launch_cursor", &error);
+                return Err(error);
+            }
             return Ok(());
         }
         match current {

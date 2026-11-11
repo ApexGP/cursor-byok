@@ -50,6 +50,12 @@ impl RunEngine {
             Ok(claimed) => claimed,
             Err(error) => {
                 let outcome = RunOutcome::Failed(error.into());
+                crate::diagnostics::capture_run_outcome(
+                    &prepared.run_id.to_string(),
+                    &prepared.conversation_id.to_string(),
+                    prepared.cursor_request_id.as_deref(),
+                    &outcome,
+                );
                 client.phase.finish();
                 let _ = client.events.send(RunEvent::Ended(outcome.clone())).await;
                 tracing::info!(outcome = ?outcome, "Run claim failed");
@@ -84,6 +90,12 @@ impl RunEngine {
         {
             tracing::error!(run_id = %prepared.run_id, %error, "failed to persist Run outcome");
         }
+        crate::diagnostics::capture_run_outcome(
+            &prepared.run_id.to_string(),
+            &prepared.conversation_id.to_string(),
+            prepared.cursor_request_id.as_deref(),
+            &outcome,
+        );
         client.phase.finish();
         let _ = client.events.send(RunEvent::Ended(outcome.clone())).await;
         tracing::info!(outcome = ?outcome, usage = ?usage, "Run ended");
