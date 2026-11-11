@@ -1,0 +1,57 @@
+name: Diagnostic report
+description: Report a cursor-byok failure with a structured diagnostic JSON block
+title: "[CB-XXXX-000] "
+labels:
+  - diagnostics
+  - auto-report
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when reporting a captured failure manually. Prefer the in-app **Issues detected** flow, which fills this structure for you.
+        Do not include API keys, Authorization headers, message contents, request/response bodies, or full database files.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What failed, in one or two sentences.
+    validations:
+      required: true
+  - type: input
+    id: error_code
+    attributes:
+      label: Error code
+      description: The CB-AREA-NNN code shown in the app.
+      placeholder: CB-SYNC-001
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: cursor-byok version, Cursor version, OS version.
+      placeholder: cursor-byok 1.0.6, Cursor 0.48.6, Windows 11 23H2
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: What the user did before the failure.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostic_json
+    attributes:
+      label: Diagnostic JSON
+      description: Paste the content between the CURSOR_BYOK_DIAGNOSTIC_START and END markers, including the json fence.
+      render: json
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I removed credentials, message contents, and raw request/response bodies.
+          required: true

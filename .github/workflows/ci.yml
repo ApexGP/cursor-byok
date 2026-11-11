@@ -67,6 +67,9 @@ jobs:
       - name: Run release script tests
         run: node --test .github/scripts/*.test.mjs
 
+      - name: Run diagnostics parser tests
+        run: node --test support/diagnostics/*.test.mjs
+
   desktop-rust:
     name: Desktop Rust (${{ matrix.os }})
     strategy:
