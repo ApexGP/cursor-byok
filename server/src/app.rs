@@ -1,5 +1,5 @@
 //! Assembles server dependencies and starts the application services.
-use std::{future::IntoFuture, net::SocketAddr, time::Duration};
+use std::{future::IntoFuture, net::SocketAddr, sync::Arc, time::Duration};
 
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -49,8 +49,7 @@ impl App {
             max_events: 200,
             log_window: Duration::from_secs(120),
         };
-        let diagnostics = DiagnosticsHub::new(diagnostics_config, store.clone()).await?;
-        DiagnosticsHub::install_global(diagnostics.clone());
+        let diagnostics = init_diagnostics(store.clone(), diagnostics_config).await;
         if config.use_persisted_ports {
             config
                 .listen_addr
@@ -73,7 +72,10 @@ impl App {
             crate::config::managed_data_dir()?.join("rules"),
         );
         let control = control::ControlService::new(store.clone(), provider, clients.clone())?;
-        control.set_diagnostics(diagnostics);
+        if let Some(hub) = diagnostics {
+            DiagnosticsHub::install_global(hub.clone());
+            control.set_diagnostics(hub);
+        }
         // Desktop startup syncs the catalog from `CursorHarness::restore()`
         // after the listener is bound, so it always uses the actual service
         // port. Skipping the pre-bind sync avoids writing a stale URL twice.
@@ -174,6 +176,18 @@ impl App {
     }
 }
 
+/// Diagnostics is optional: storage failures must never prevent the main
+/// service from starting.
+async fn init_diagnostics(store: Store, config: DiagnosticsConfig) -> Option<Arc<DiagnosticsHub>> {
+    match DiagnosticsHub::new(config, store).await {
+        Ok(hub) => Some(hub),
+        Err(error) => {
+            tracing::warn!(%error, "failed to initialize diagnostics; continuing without it");
+            None
+        }
+    }
+}
+
 /// Normalizes a diagnostics upload URL: blank values disable uploads.
 fn normalize_upload_url(raw: Option<String>) -> Option<String> {
     raw.map(|value| value.trim().to_string())
@@ -213,7 +227,36 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_upload_url;
+    use super::{init_diagnostics, normalize_upload_url};
+    use crate::{diagnostics::DiagnosticsConfig, store::Store};
+    use std::time::Duration;
+
+    fn test_diagnostics_config(data_dir: std::path::PathBuf) -> DiagnosticsConfig {
+        DiagnosticsConfig {
+            enabled: true,
+            upload_url: None,
+            github_repository: "ApexGP/cursor-byok".to_string(),
+            retention_days: 7,
+            max_events: 200,
+            log_window: Duration::from_secs(120),
+            data_dir,
+            app_version: "test".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostics_init_failure_is_non_fatal() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("diagnostics");
+        // An existing file makes `create_dir_all` fail, exercising the
+        // best-effort path without touching permissions.
+        std::fs::write(&data_dir, b"not a directory").unwrap();
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+
+        let hub = init_diagnostics(store, test_diagnostics_config(data_dir)).await;
+
+        assert!(hub.is_none());
+    }
 
     #[test]
     fn blank_upload_url_is_disabled() {
