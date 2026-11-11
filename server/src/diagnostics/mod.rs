@@ -2,6 +2,7 @@
 //!
 //! Storage, API, evidence collection, and upload live in later modules.
 
+pub mod bundle;
 pub mod code;
 pub mod cursor_state;
 pub mod db_evidence;
@@ -12,7 +13,9 @@ pub mod logs;
 pub mod redact;
 pub mod report;
 pub mod store;
+pub mod upload;
 
+pub use bundle::{build_bundle, Bundle, BUNDLE_SCHEMA_VERSION, MAX_BUNDLE_BYTES};
 pub use code::{DiagnosticCode, Severity};
 pub use cursor_state::{collect_cursor_state_evidence, CursorStateEvidence};
 pub use db_evidence::{collect_database_evidence, CursorByokEvidence, DatabaseEvidence, FileStats};
@@ -23,3 +26,4 @@ pub use logs::{collect_log_tail, LogTail};
 pub use redact::Redactor;
 pub use report::{build_report, diagnostic_json_for_issue, BundleLink, DiagnosticReport};
 pub use store::{global, record, DiagnosticsConfig, DiagnosticsHub, ReportSummary};
+pub use upload::{build_upload_and_link, ensure_upload_configured, upload_bundle, UploadedBundle};
