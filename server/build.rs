@@ -2,6 +2,11 @@
 use std::{env, path::PathBuf};
 
 fn main() {
+    // `app.rs` captures these at compile time with `option_env!`. Cargo does
+    // not track arbitrary env reads, so declare them to force a rebuild when
+    // the release workflow changes the diagnostics configuration.
+    println!("cargo:rerun-if-env-changed=CURSOR_DIAGNOSTICS_UPLOAD_URL");
+    println!("cargo:rerun-if-env-changed=CURSOR_DIAGNOSTICS_GITHUB_REPOSITORY");
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let proto_dir = manifest.join("../protocols/cursor");
     let protos = [proto_dir.join("agent_v1.proto")];
