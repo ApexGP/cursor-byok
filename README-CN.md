@@ -130,6 +130,9 @@ cursor-byok 在本机处理协议适配、模型请求转发、工具调用协�
 
 ## 项目结构
 
+<details>
+<summary>项目目录</summary>
+
 ```text
 cursor-byok/
 ├── apps/
@@ -164,6 +167,8 @@ cursor-byok/
 ├── Cargo.toml         # Rust 工作区配置
 └── Makefile           # 常用开发、检查和构建命令
 ```
+
+</details>
 
 ## 本地开发
 

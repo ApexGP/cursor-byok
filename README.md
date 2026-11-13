@@ -130,6 +130,9 @@ cursor-byok handles protocol adaptation, model request forwarding, tool-call coo
 
 ## Project Structure
 
+<details>
+<summary>Project tree</summary>
+
 ```text
 cursor-byok/
 ├── apps/
@@ -164,6 +167,8 @@ cursor-byok/
 ├── Cargo.toml         # Rust workspace configuration
 └── Makefile           # common development, check, and build commands
 ```
+
+</details>
 
 ## Development
 
