@@ -15,6 +15,19 @@ import type {
 
 const POLL_INTERVAL_MS = 10_000;
 
+// Chromium surfaces ResizeObserver reflow warnings as window `error` events
+// even though the observer retries on the next frame. They are layout noise,
+// not diagnosed failures, and reporting them only produces unreproducible
+// issues.
+const IGNORED_RENDERER_ERRORS = [
+  "ResizeObserver loop completed with undelivered notifications",
+  "ResizeObserver loop limit exceeded",
+];
+
+function isIgnorableRendererError(message: string) {
+  return IGNORED_RENDERER_ERRORS.some((known) => message.includes(known));
+}
+
 export interface DiagnosticsSnapshot {
   reports: DiagnosticsReportSummary[];
   busy: boolean;
@@ -102,6 +115,7 @@ async function dismiss(reportId: string) {
 }
 
 export function reportRendererError(input: FrontendDiagnosticError) {
+  if (isIgnorableRendererError(input.message)) return;
   void reportFrontendError(input).catch(() => {
     // Reporting must never make the renderer error worse.
   });

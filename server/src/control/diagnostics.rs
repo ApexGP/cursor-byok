@@ -84,6 +84,11 @@ pub async fn create_issue(
     let link = build_upload_and_link(config, &report, &report.logs).await?;
     let draft = render_issue(&report, Some(&link), &config.github_repository)?;
     let url = issue_url(&config.github_repository, &draft);
+    // The renderer drops the row optimistically; hiding it here keeps the 10s
+    // poll from resurrecting a report the user has already filed.
+    if let Err(error) = hub.dismiss(&report_id).await {
+        tracing::warn!(%error, report_id = %report_id, "failed to hide reported diagnostics");
+    }
     Ok(Json(IssuePreview {
         title: draft.title,
         body: draft.body,
@@ -110,6 +115,9 @@ pub async fn frontend(
     Json(input): Json<FrontendError>,
 ) -> Result<StatusCode> {
     let hub = hub(&service)?;
+    if is_ignorable_renderer_error(&input.message) {
+        return Ok(StatusCode::ACCEPTED);
+    }
     let code = match input.code.as_str() {
         "CB-UI-001" => DiagnosticCode::UiBoundary,
         _ => DiagnosticCode::UiUnhandled,
@@ -133,6 +141,13 @@ fn hub(service: &ControlService) -> Result<&std::sync::Arc<crate::diagnostics::D
     service
         .diagnostics()
         .ok_or_else(|| Error::Config("diagnostics are unavailable".into()))
+}
+
+/// Browser layout warnings that are retried by the engine and carry no
+/// actionable failure information.
+fn is_ignorable_renderer_error(message: &str) -> bool {
+    message.contains("ResizeObserver loop completed with undelivered notifications")
+        || message.contains("ResizeObserver loop limit exceeded")
 }
 
 fn not_found(report_id: &str) -> Error {

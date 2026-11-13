@@ -145,7 +145,7 @@ async fn issue_endpoint_uploads_once_and_returns_prefilled_url() {
     let id = reports[0]["reportId"].as_str().unwrap();
 
     let (status, body) = send(
-        router,
+        router.clone(),
         "POST",
         &format!("/__byok-api__/api/diagnostics/reports/{id}/issue"),
         json!({}),
@@ -165,6 +165,51 @@ async fn issue_endpoint_uploads_once_and_returns_prefilled_url() {
         .as_str()
         .unwrap()
         .contains("CURSOR_BYOK_DIAGNOSTIC_START"));
+
+    let (_, list) = send(
+        router,
+        "GET",
+        "/__byok-api__/api/diagnostics/reports",
+        json!({}),
+    )
+    .await;
+    let reports: Value = serde_json::from_str(&list).unwrap();
+    assert!(
+        reports.as_array().unwrap().is_empty(),
+        "filed report must not reappear in the list: {reports}"
+    );
+}
+
+#[tokio::test]
+async fn resize_observer_noise_is_not_recorded() {
+    let (router, _store, _directory, _hub) = setup(None).await;
+
+    let (status, _) = send(
+        router.clone(),
+        "POST",
+        "/__byok-api__/api/diagnostics/frontend",
+        json!({
+            "code": "CB-UI-002",
+            "message": "ResizeObserver loop completed with undelivered notifications.",
+            "stack": "at ResizeObserver"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let (_, body) = send(
+        router,
+        "GET",
+        "/__byok-api__/api/diagnostics/reports",
+        json!({}),
+    )
+    .await;
+    let reports: Value = serde_json::from_str(&body).unwrap();
+    assert!(reports
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|report| report["code"] != "CB-UI-002"));
 }
 
 #[tokio::test]
