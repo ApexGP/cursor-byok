@@ -163,6 +163,8 @@ cursor-byok/
 ├── support/           # 仓库辅助设施
 │   ├── cursor-protocol-extractor/ # 协议提取与 Go 代码生成
 │   ├── cursor-capture/            # 协议抓取与调试
+│   ├── diagnostics/               # 供 agent 解析 Issue JSON 的脚本
+│   ├── diagnostics-relay/         # 诊断包上传的 Cloudflare Worker
 │   └── benchmarks/                # 代码搜索与索引基准
 ├── Cargo.toml         # Rust 工作区配置
 └── Makefile           # 常用开发、检查和构建命令

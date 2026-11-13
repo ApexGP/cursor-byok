@@ -163,6 +163,8 @@ cursor-byok/
 ├── support/           # repository support tools
 │   ├── cursor-protocol-extractor/ # protocol extraction and Go codegen
 │   ├── cursor-capture/            # protocol capture and debugging
+│   ├── diagnostics/               # issue JSON parser for agents
+│   ├── diagnostics-relay/         # Cloudflare Worker for diagnostic uploads
 │   └── benchmarks/                # code search and indexing benchmarks
 ├── Cargo.toml         # Rust workspace configuration
 └── Makefile           # common development, check, and build commands
