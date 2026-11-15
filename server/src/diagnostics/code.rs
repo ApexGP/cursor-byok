@@ -27,6 +27,11 @@ pub enum DiagnosticCode {
 }
 
 impl DiagnosticCode {
+    /// Whether this code is emitted by the renderer rather than the agent.
+    pub fn is_ui(self) -> bool {
+        matches!(self, Self::UiBoundary | Self::UiUnhandled)
+    }
+
     /// Returns the stable `CB-<AREA>-<NNN>` identifier.
     ///
     /// Codes are append-only: never change or reuse an existing mapping.
@@ -70,6 +75,13 @@ impl DiagnosticCode {
     }
 }
 
+/// Chromium and WebView2 surface ResizeObserver reflow warnings as window
+/// errors even though the engine retries on the next frame. They are layout
+/// noise, not actionable failures.
+pub fn is_ignorable_renderer_error(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("resizeobserver loop")
+}
+
 /// Severity assigned to a diagnostic event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -108,6 +120,22 @@ mod tests {
         }
         assert_eq!(DiagnosticCode::Sync.as_str(), "CB-SYNC-001");
         assert_eq!(DiagnosticCode::Run.as_str(), "CB-RUN-001");
+    }
+
+    #[test]
+    fn resize_observer_variants_are_ignorable() {
+        assert!(is_ignorable_renderer_error(
+            "ResizeObserver loop completed with undelivered notifications."
+        ));
+        assert!(is_ignorable_renderer_error(
+            "resizeobserver loop limit exceeded"
+        ));
+        assert!(is_ignorable_renderer_error(
+            "[WebView2] ResizeObserver loop completed with undelivered notifications."
+        ));
+        assert!(!is_ignorable_renderer_error(
+            "Cannot read properties of undefined (reading 'x')"
+        ));
     }
 
     #[test]

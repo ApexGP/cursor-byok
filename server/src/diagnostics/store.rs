@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     diagnostics::{
-        code::Severity,
+        code::{is_ignorable_renderer_error, Severity},
         event::{DiagnosticContext, DiagnosticEvent},
         redact::Redactor,
     },
@@ -250,6 +250,9 @@ impl DiagnosticsHub {
     fn record_at(&self, mut event: DiagnosticEvent, now: DateTime<Utc>) {
         event.captured_at = now;
         let event = redact_event(&Redactor::new(), event);
+        if event.code.is_ui() && is_ignorable_renderer_error(&event.summary) {
+            return;
+        }
         // Enqueue while the state lock is still held. The writer never takes
         // this lock, so this keeps aggregate snapshots in state-update order:
         // a stale snapshot can never be enqueued after a newer one.
@@ -270,6 +273,11 @@ impl DiagnosticsHub {
 
         let mut reports = Vec::with_capacity(state.reports.len());
         for report in state.reports.values() {
+            // Reports persisted before the renderer filter shipped must not
+            // resurface in the UI after an upgrade.
+            if report.event.code.is_ui() && is_ignorable_renderer_error(&report.event.summary) {
+                continue;
+            }
             let hidden = state
                 .dismissed
                 .get(&report.fingerprint)
@@ -802,6 +810,43 @@ mod tests {
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].occurrences, 2);
         assert_eq!(reports[0].code, "CB-SYNC-001");
+    }
+
+    #[tokio::test]
+    async fn resize_observer_noise_is_dropped_before_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = DiagnosticsHub::new(test_config(&temp), test_store().await)
+            .await
+            .unwrap();
+        hub.record(DiagnosticEvent::new(
+            DiagnosticCode::UiUnhandled,
+            "ResizeObserver loop completed with undelivered notifications.",
+        ));
+        assert!(hub.reports().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_resize_observer_reports_are_hidden() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = DiagnosticsHub::new(test_config(&temp), test_store().await)
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let event = DiagnosticEvent::new(
+            DiagnosticCode::UiUnhandled,
+            "resizeobserver loop limit exceeded",
+        );
+        hub.inner.state.lock().reports.insert(
+            event.report_id.clone(),
+            ReportState {
+                fingerprint: event.fingerprint.clone(),
+                occurrences: 1,
+                first_seen: now,
+                last_seen: now,
+                event,
+            },
+        );
+        assert!(hub.reports().await.is_empty());
     }
 
     #[tokio::test]

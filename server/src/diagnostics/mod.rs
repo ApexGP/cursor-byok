@@ -22,7 +22,7 @@ pub use capture::{
     build_process_error_event, build_run_failure_event, build_sync_error_event,
     capture_process_error, capture_run_outcome, capture_sync_error, code_for_run_failure,
 };
-pub use code::{DiagnosticCode, Severity};
+pub use code::{is_ignorable_renderer_error, DiagnosticCode, Severity};
 pub use cursor_state::{collect_cursor_state_evidence, CursorStateEvidence};
 pub use db_evidence::{collect_database_evidence, CursorByokEvidence, DatabaseEvidence, FileStats};
 pub use event::{fingerprint, DiagnosticContext, DiagnosticEvent};

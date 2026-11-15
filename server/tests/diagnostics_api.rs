@@ -184,18 +184,23 @@ async fn issue_endpoint_uploads_once_and_returns_prefilled_url() {
 async fn resize_observer_noise_is_not_recorded() {
     let (router, _store, _directory, _hub) = setup(None).await;
 
-    let (status, _) = send(
-        router.clone(),
-        "POST",
-        "/__byok-api__/api/diagnostics/frontend",
-        json!({
-            "code": "CB-UI-002",
-            "message": "ResizeObserver loop completed with undelivered notifications.",
-            "stack": "at ResizeObserver"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::ACCEPTED);
+    for message in [
+        "ResizeObserver loop completed with undelivered notifications.",
+        "[WebView2] resizeobserver loop limit exceeded",
+    ] {
+        let (status, _) = send(
+            router.clone(),
+            "POST",
+            "/__byok-api__/api/diagnostics/frontend",
+            json!({
+                "code": "CB-UI-002",
+                "message": message,
+                "stack": "at ResizeObserver"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
 
     let (_, body) = send(
         router,

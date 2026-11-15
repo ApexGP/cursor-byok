@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     control::ControlService,
     diagnostics::{
-        build_report, build_upload_and_link, ensure_upload_configured, issue_url, render_issue,
-        DiagnosticCode, DiagnosticContext, DiagnosticEvent, ReportSummary,
+        build_report, build_upload_and_link, ensure_upload_configured, is_ignorable_renderer_error,
+        issue_url, render_issue, DiagnosticCode, DiagnosticContext, DiagnosticEvent, ReportSummary,
     },
     Error, Result,
 };
@@ -141,13 +141,6 @@ fn hub(service: &ControlService) -> Result<&std::sync::Arc<crate::diagnostics::D
     service
         .diagnostics()
         .ok_or_else(|| Error::Config("diagnostics are unavailable".into()))
-}
-
-/// Browser layout warnings that are retried by the engine and carry no
-/// actionable failure information.
-fn is_ignorable_renderer_error(message: &str) -> bool {
-    message.contains("ResizeObserver loop completed with undelivered notifications")
-        || message.contains("ResizeObserver loop limit exceeded")
 }
 
 fn not_found(report_id: &str) -> Error {
