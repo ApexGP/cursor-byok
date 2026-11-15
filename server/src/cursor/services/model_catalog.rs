@@ -15,6 +15,12 @@ use crate::{
     Error, Result,
 };
 
+/// Last successfully merged `AvailableModels` body (official models plus BYOK
+/// additions). Cursor filters `aiSettings.modelOverrideDisabled` to the IDs in
+/// each catalog response, so answering a transient upstream failure with a
+/// local-only catalog makes it silently forget every hidden official model.
+static LAST_COMPLETE_CATALOG: std::sync::Mutex<Option<Bytes>> = std::sync::Mutex::new(None);
+
 #[derive(Clone, PartialEq, Message)]
 struct AvailableModelsAddition {
     #[prost(string, repeated, tag = "1")]
@@ -324,10 +330,46 @@ pub async fn available_models(
     }
     .encode_to_vec();
     match proxy::forward_buffered(&proxy, request).await {
-        Ok(upstream) => merge_response(upstream, local, local_count > 0, &local_names),
+        Ok(upstream) if upstream.status.is_success() => {
+            match merge_response(upstream, local.clone(), local_count > 0, &local_names) {
+                Ok((response, body, upstream_models)) => {
+                    if upstream_models {
+                        remember_catalog(&body);
+                        Ok(response)
+                    } else if let Some(cached) = cached_catalog() {
+                        tracing::warn!(
+                            "Cursor AvailableModels returned no models; serving last complete catalog"
+                        );
+                        Ok(local_response(cached.to_vec()))
+                    } else {
+                        tracing::warn!(
+                            "Cursor AvailableModels returned no models; serving local-only catalog"
+                        );
+                        Ok(response)
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Cursor AvailableModels merge failed");
+                    Ok(local_response(
+                        fallback_catalog_body(cached_catalog(), local).to_vec(),
+                    ))
+                }
+            }
+        }
+        Ok(upstream) => {
+            tracing::warn!(
+                status = %upstream.status,
+                "Cursor AvailableModels upstream rejected request"
+            );
+            Ok(local_response(
+                fallback_catalog_body(cached_catalog(), local).to_vec(),
+            ))
+        }
         Err(error) => {
-            tracing::warn!(%error, "Cursor AvailableModels upstream unavailable; using local catalog");
-            Ok(local_response(local))
+            tracing::warn!(%error, "Cursor AvailableModels upstream unavailable");
+            Ok(local_response(
+                fallback_catalog_body(cached_catalog(), local).to_vec(),
+            ))
         }
     }
 }
@@ -347,7 +389,16 @@ pub async fn usable_models(
     }
     .encode_to_vec();
     match proxy::forward_buffered(&proxy, request).await {
-        Ok(upstream) => merge_response(upstream, local, false, &[]),
+        Ok(upstream) if upstream.status.is_success() => {
+            merge_response(upstream, local, false, &[]).map(|(response, _, _)| response)
+        }
+        Ok(upstream) => {
+            tracing::warn!(
+                status = %upstream.status,
+                "Cursor GetUsableModels upstream rejected request; using local catalog"
+            );
+            Ok(local_response(local))
+        }
         Err(error) => {
             tracing::warn!(%error, "Cursor GetUsableModels upstream unavailable; using local catalog");
             Ok(local_response(local))
@@ -553,12 +604,11 @@ fn merge_response(
     extra: Vec<u8>,
     strip_policy: bool,
     local_names: &[String],
-) -> Result<Response<Body>> {
-    if !upstream.status.is_success() {
-        tracing::warn!(status = %upstream.status, "Cursor model catalog upstream rejected request; using local catalog");
-        return Ok(local_response(extra));
-    }
+) -> Result<(Response<Body>, Bytes, bool)> {
     let (framed, payload) = unary_payload(&upstream.body)?;
+    // `model_names` (field 1) is empty in real Cursor responses; the catalog
+    // itself is the repeated `models` field (field 2).
+    let upstream_models = !top_level_models(payload).is_empty();
     // Cursor's official picker filters models through `display_configuration`
     // and may auto-disable unused models. Both policies are only meaningful for
     // official IDs; leaving them in place hides appended BYOK models once the
@@ -581,7 +631,41 @@ fn merge_response(
     } else {
         Bytes::from(merged_payload)
     };
-    Ok(upstream.with_body(body))
+    let response = upstream.with_body(body.clone());
+    Ok((response, body, upstream_models))
+}
+
+fn remember_catalog(body: &Bytes) {
+    match LAST_COMPLETE_CATALOG.lock() {
+        Ok(mut cached) => *cached = Some(body.clone()),
+        Err(error) => tracing::warn!(%error, "Cursor catalog cache lock poisoned"),
+    }
+}
+
+fn cached_catalog() -> Option<Bytes> {
+    LAST_COMPLETE_CATALOG
+        .lock()
+        .ok()
+        .and_then(|cached| cached.clone())
+}
+
+fn fallback_catalog_body(cached: Option<Bytes>, local: Vec<u8>) -> Bytes {
+    match cached {
+        Some(body) => {
+            tracing::warn!(
+                bytes = body.len(),
+                "serving the last complete Cursor catalog"
+            );
+            body
+        }
+        None => {
+            tracing::warn!(
+                bytes = local.len(),
+                "no complete Cursor catalog cached; serving local-only catalog"
+            );
+            Bytes::from(local)
+        }
+    }
 }
 
 /// Official catalog fields that must not apply to appended BYOK models:
@@ -692,15 +776,21 @@ fn top_level_strings(payload: &[u8], number: u64) -> Vec<String> {
         .collect()
 }
 
-fn log_merged_catalog(payload: &[u8], local_names: &[String]) {
-    let model_names = top_level_strings(payload, 1);
-    let models = parse_top_level(payload)
+/// Names from the repeated `models` field (2). Real `AvailableModels` responses
+/// leave `model_names` (field 1) empty, so this is the completeness signal.
+fn top_level_models(payload: &[u8]) -> Vec<String> {
+    parse_top_level(payload)
         .unwrap_or_default()
         .into_iter()
         .filter(|field| field.number == 2)
         .filter_map(|field| read_length_delimited(field.raw))
         .filter_map(|inner| top_level_strings(inner, 1).into_iter().next())
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn log_merged_catalog(payload: &[u8], local_names: &[String]) {
+    let model_names = top_level_strings(payload, 1);
+    let models = top_level_models(payload);
     let missing_local = local_names
         .iter()
         .filter(|name| !models.contains(name))
@@ -1344,6 +1434,47 @@ mod tests {
         let available = available_model(&model);
         assert_eq!(available.context_token_limit, Some(1_000_000));
         assert_eq!(available.context_token_limit_for_max_mode, Some(1_000_000));
+    }
+
+    #[test]
+    fn fallback_prefers_the_last_complete_catalog() {
+        let cached = Bytes::from_static(b"official+local");
+        let local = b"local".to_vec();
+        assert_eq!(
+            fallback_catalog_body(Some(cached.clone()), local.clone()),
+            cached
+        );
+        assert_eq!(
+            fallback_catalog_body(None, local),
+            Bytes::from_static(b"local")
+        );
+    }
+
+    #[test]
+    fn merge_response_appends_local_models_and_reports_upstream_models() {
+        // Real Cursor responses put the catalog in `models` (field 2) and
+        // leave `model_names` (field 1) empty.
+        let upstream_body = [0x12, 0x03, 0x0A, 0x01, b'o'];
+        let upstream = proxy::BufferedResponse {
+            status: StatusCode::OK,
+            headers: axum::http::HeaderMap::new(),
+            body: Bytes::copy_from_slice(&upstream_body),
+        };
+        let local = [0x0A, 0x01, b'l', 0x12, 0x03, 0x0A, 0x01, b'l'];
+        let (_, body, has_upstream_models) =
+            merge_response(upstream, local.to_vec(), false, &["l".into()]).unwrap();
+        assert!(has_upstream_models);
+        let mut expected = upstream_body.to_vec();
+        expected.extend_from_slice(&local);
+        assert_eq!(body.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn catalog_completeness_uses_the_models_field() {
+        assert!(top_level_models(&[]).is_empty());
+        // A `model_names`-only payload is not a usable catalog.
+        assert!(top_level_models(&[0x0A, 0x01, b'a']).is_empty());
+        assert_eq!(top_level_models(&[0x12, 0x03, 0x0A, 0x01, b'a']), vec!["a"]);
     }
 
     #[test]
