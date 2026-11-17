@@ -6,7 +6,7 @@
 
 cursor-byok 是一个开源的本机 Cursor 模型网关。它把 Cursor 的 Agent 请求转发到你配置的 OpenAI / Anthropic 兼容服务，并尽可能保留工具调用、Skills、MCP 和多轮对话能力。
 
-[English](./README.md) · [使用指南](https://docs.leokun.cn) · [下载](https://github.com/ApexGP/cursor-byok/releases/latest) · [提交问题](https://github.com/ApexGP/cursor-byok/issues)
+[English](./README.md) · [下载](https://github.com/ApexGP/cursor-byok/releases/latest) · [提交问题](https://github.com/ApexGP/cursor-byok/issues)
 
 [![Release](https://img.shields.io/github/v/release/ApexGP/cursor-byok?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/ApexGP/cursor-byok/total?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases)
@@ -56,8 +56,6 @@ Cursor 很强，但可用的模型通常受限于平台提供的渠道。cursor-
 
 > [!TIP]
 > Cursor 只在进程启动时读取代理和 backend 配置。首次配置或升级 Cursor 后必须完整重启；已经打开的对话不会加载新的连接。
-
-完整的安装步骤、配置说明和常见问题，请参阅[中文使用指南](https://docs.leokun.cn/zh/docs)。
 
 ## 模型配置
 
@@ -206,7 +204,6 @@ make build-docker   # 构建 Docker 镜像
 
 ## 社区与反馈
 
-- [中文使用指南](https://docs.leokun.cn/zh/docs)
 - [GitHub Issues](https://github.com/ApexGP/cursor-byok/issues)
 - [Telegram 社区](https://t.me/cursor_byok)
 - QQ 群：`1095916242`、`1094411438`、`1095918002`、`1094419321`

@@ -6,7 +6,7 @@
 
 cursor-byok is an open-source local model gateway for Cursor. It connects Cursor to the OpenAI- and Anthropic-compatible services you configure, while keeping tool calling, Skills, MCP, and multi-turn Agent workflows available.
 
-[简体中文](./README-CN.md) · [User Guide](https://docs.leokun.cn) · [Download](https://github.com/ApexGP/cursor-byok/releases/latest) · [Report an Issue](https://github.com/ApexGP/cursor-byok/issues)
+[简体中文](./README-CN.md) · [Download](https://github.com/ApexGP/cursor-byok/releases/latest) · [Report an Issue](https://github.com/ApexGP/cursor-byok/issues)
 
 [![Release](https://img.shields.io/github/v/release/ApexGP/cursor-byok?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/ApexGP/cursor-byok/total?style=flat-square)](https://github.com/ApexGP/cursor-byok/releases)
@@ -56,8 +56,6 @@ Cursor is powerful, but its model choices are tied to the platform. cursor-byok 
 
 > [!TIP]
 > Cursor reads its proxy and backend configuration at process startup. After the first setup or a Cursor upgrade, a full restart is required. Conversations that were already open will not pick up the new connection.
-
-For installation, system configuration, and FAQ, see the [User Guide](https://docs.leokun.cn).
 
 ## Model Configuration
 
@@ -206,7 +204,6 @@ make build-docker   # build the Docker image
 
 ## Community and Support
 
-- [User Guide](https://docs.leokun.cn)
 - [GitHub Issues](https://github.com/ApexGP/cursor-byok/issues)
 - [Telegram community](https://t.me/cursor_byok)
 - QQ groups: `1095916242`, `1094411438`, `1095918002`, `1094419321`
