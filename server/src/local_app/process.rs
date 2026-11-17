@@ -323,19 +323,77 @@ async fn terminate_platform_cursor() -> Result<()> {
     if !cursor_running_platform().await? {
         return Ok(());
     }
-    let mut kill = Command::new("taskkill");
-    hide_console(&mut kill);
-    let terminated = kill
-        .args(["/F", "/T", "/IM", "Cursor.exe"])
-        .status()
-        .await?;
-    if terminated.success() {
-        Ok(())
-    } else {
-        Err(Error::Config(
-            "failed to terminate the Cursor.exe process".into(),
-        ))
+    let mut last_failure = None;
+    for attempt in 0..3 {
+        let mut kill = Command::new("taskkill");
+        hide_console(&mut kill);
+        let output = kill
+            .args(["/F", "/T", "/IM", "Cursor.exe"])
+            .output()
+            .await?;
+        // taskkill returns non-zero when a child has already exited, when only
+        // some instances matched, or when Cursor is elevated. The goal is that
+        // no Cursor.exe remains, so re-check instead of trusting the code.
+        if taskkill_outcome(output.status.success(), cursor_running_platform().await?)
+            == KillOutcome::Done
+        {
+            return Ok(());
+        }
+        let detail = describe_process_failure(output.status.code(), &output.stdout, &output.stderr);
+        tracing::debug!(
+            attempt = attempt + 1,
+            %detail,
+            "taskkill did not stop Cursor"
+        );
+        last_failure = Some(detail);
+        if attempt < 2 {
+            sleep(Duration::from_millis(200)).await;
+        }
     }
+    Err(Error::Config(match last_failure {
+        Some(detail) => format!(
+            "failed to terminate the Cursor.exe process ({detail}); close Cursor manually or run Cursor BYOK with the same privilege level"
+        ),
+        None => "failed to terminate the Cursor.exe process".into(),
+    }))
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KillOutcome {
+    Done,
+    Retry,
+}
+
+/// A non-zero taskkill exit code is not fatal when Cursor is already gone.
+/// Races with Cursor's own updater and partial child failures both produce
+/// non-zero exits even though the stop succeeded.
+#[cfg(any(target_os = "windows", test))]
+fn taskkill_outcome(success: bool, still_running: bool) -> KillOutcome {
+    if success || !still_running {
+        KillOutcome::Done
+    } else {
+        KillOutcome::Retry
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn describe_process_failure(exit_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> String {
+    let mut detail = match exit_code {
+        Some(code) => format!("taskkill exited with {code}"),
+        None => "taskkill was terminated by a signal".to_string(),
+    };
+    for (label, bytes) in [("stdout", stdout), ("stderr", stderr)] {
+        let text = String::from_utf8_lossy(bytes).replace(['\r', '\n'], " ");
+        let text = text.trim();
+        if !text.is_empty() {
+            detail.push_str(&format!(
+                "; {label}: {}",
+                text.chars().take(300).collect::<String>()
+            ));
+        }
+    }
+    detail
 }
 
 #[cfg(target_os = "windows")]
@@ -445,5 +503,30 @@ mod tests {
             parse_env_value("PID COMMAND OTHER=1", "MOLTEN_GLASS_BACKEND_URL"),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod process_failure_tests {
+    use super::{describe_process_failure, taskkill_outcome, KillOutcome};
+
+    #[test]
+    fn taskkill_exit_code_does_not_override_the_process_state() {
+        assert_eq!(taskkill_outcome(false, false), KillOutcome::Done);
+        assert_eq!(taskkill_outcome(false, true), KillOutcome::Retry);
+        assert_eq!(taskkill_outcome(true, false), KillOutcome::Done);
+        assert_eq!(taskkill_outcome(true, true), KillOutcome::Done);
+    }
+
+    #[test]
+    fn taskkill_failure_detail_keeps_exit_code_and_reason() {
+        let detail = describe_process_failure(
+            Some(128),
+            b"",
+            b"ERROR: The process \"Cursor.exe\" not found.\r\n",
+        );
+        assert!(detail.contains("128"));
+        assert!(detail.contains("not found"));
+        assert!(!detail.contains('\n'));
     }
 }
