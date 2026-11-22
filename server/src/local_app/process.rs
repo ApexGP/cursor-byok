@@ -7,13 +7,12 @@ use tokio::{
     time::{sleep, Instant},
 };
 
+use std::path::PathBuf;
+
 use crate::{Error, Result};
 
 #[cfg(target_os = "linux")]
 use std::process::Stdio;
-
-#[cfg(windows)]
-use std::path::PathBuf;
 
 const CURSOR_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -50,6 +49,14 @@ pub async fn cursor_running() -> Result<bool> {
     cursor_running_platform().await
 }
 
+/// Returns the installed Cursor version, if it can be read without modifying
+/// the installation. Used to detect an updater relaunch, which drops the
+/// `--test-backend-url` argument and silently sends Agent runs to the official
+/// backend.
+pub async fn cursor_version() -> Result<Option<String>> {
+    cursor_version_platform().await
+}
+
 /// Returns the `--test-backend-url` value of the running Cursor process, if
 /// any. Used at startup to refresh a stale local URL after a service-port
 /// change without touching Cursor launched for other backends.
@@ -63,6 +70,113 @@ pub async fn cursor_backend_override() -> Result<Option<String>> {
 /// restart based on this value.
 pub async fn cursor_has_molten_backend(expected: &str) -> Result<Option<bool>> {
     molten_backend_platform(expected).await
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", test))]
+fn version_from_package_json(text: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()?
+        .get("version")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+async fn read_package_version(path: PathBuf) -> Option<String> {
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    version_from_package_json(&text)
+}
+
+#[cfg(target_os = "macos")]
+async fn cursor_version_platform() -> Result<Option<String>> {
+    if let Ok(output) = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .await
+    {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let mut parts = line.split_whitespace();
+                let _pid = parts.next();
+                let Some(executable) = parts.next() else {
+                    continue;
+                };
+                let Some(bundle) = executable.strip_suffix("/Contents/MacOS/Cursor") else {
+                    continue;
+                };
+                if let Some(version) = read_package_version(
+                    PathBuf::from(bundle).join("Contents/Resources/app/package.json"),
+                )
+                .await
+                {
+                    return Ok(Some(version));
+                }
+            }
+        }
+    }
+    Ok(read_package_version(PathBuf::from(
+        "/Applications/Cursor.app/Contents/Resources/app/package.json",
+    ))
+    .await)
+}
+
+#[cfg(target_os = "linux")]
+async fn cursor_version_platform() -> Result<Option<String>> {
+    for candidate in [
+        "/usr/share/cursor/resources/app/package.json",
+        "/opt/Cursor/resources/app/package.json",
+        "/opt/cursor/resources/app/package.json",
+    ] {
+        if let Some(version) = read_package_version(PathBuf::from(candidate)).await {
+            return Ok(Some(version));
+        }
+    }
+    if let Ok(output) = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .await
+    {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let mut parts = line.split_whitespace();
+                let _pid = parts.next();
+                let Some(executable) = parts.next() else {
+                    continue;
+                };
+                if !(executable.ends_with("/cursor") || executable.ends_with("/Cursor")) {
+                    continue;
+                }
+                let Some(root) = PathBuf::from(executable)
+                    .parent()
+                    .map(|path| path.to_path_buf())
+                else {
+                    continue;
+                };
+                if let Some(version) =
+                    read_package_version(root.join("resources/app/package.json")).await
+                {
+                    return Ok(Some(version));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(target_os = "windows")]
+async fn cursor_version_platform() -> Result<Option<String>> {
+    let Some(executable) = windows_cursor_executable().filter(|path| path.exists()) else {
+        return Ok(None);
+    };
+    let Some(root) = executable.parent() else {
+        return Ok(None);
+    };
+    Ok(read_package_version(root.join("resources").join("app").join("package.json")).await)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+async fn cursor_version_platform() -> Result<Option<String>> {
+    Ok(None)
 }
 
 #[cfg(target_os = "macos")]
@@ -503,6 +617,21 @@ mod tests {
             parse_env_value("PID COMMAND OTHER=1", "MOLTEN_GLASS_BACKEND_URL"),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::version_from_package_json;
+
+    #[test]
+    fn reads_version_from_cursor_package_json() {
+        assert_eq!(
+            version_from_package_json(r#"{"version":"3.31.15"}"#).as_deref(),
+            Some("3.31.15")
+        );
+        assert_eq!(version_from_package_json("{}"), None);
+        assert_eq!(version_from_package_json("not json"), None);
     }
 }
 

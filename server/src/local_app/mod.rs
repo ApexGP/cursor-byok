@@ -94,6 +94,11 @@ struct Inner {
     tab_mode: Arc<RwLock<TabMode>>,
     proxy: Mutex<ProxyRuntime>,
     supervisor_started: AtomicBool,
+    /// Serializes stop/sync/launch sequences from the UI, startup reconcile,
+    /// and the version watchdog.
+    cursor_control: Mutex<()>,
+    /// Backoff for a failed version-triggered restart.
+    cursor_retry_at: Mutex<Option<std::time::Instant>>,
 }
 
 impl CursorHarness {
@@ -107,6 +112,8 @@ impl CursorHarness {
                 tab_mode: Arc::new(RwLock::new(TabMode::default())),
                 proxy: Mutex::new(ProxyRuntime::default()),
                 supervisor_started: AtomicBool::new(false),
+                cursor_control: Mutex::new(()),
+                cursor_retry_at: Mutex::new(None),
             }),
         })
     }
@@ -192,6 +199,7 @@ impl CursorHarness {
                 apply_cursor_configuration(&live_url).await?;
             }
         }
+        self.ensure_cursor_version().await?;
         Ok(())
     }
 
@@ -337,6 +345,7 @@ impl CursorHarness {
         let service_url = self
             .backend_url()
             .ok_or_else(|| Error::Config("desktop management server is not ready".into()))?;
+        let _control = self.inner.cursor_control.lock().await;
         // Cursor must be stopped before patching applicationUser; otherwise its
         // in-memory state overwrites the sync and resets model visibility.
         if let Err(error) = process::stop_cursor().await {
@@ -350,6 +359,7 @@ impl CursorHarness {
             crate::diagnostics::capture_process_error("launch_cursor", &error);
             return Err(error);
         }
+        self.record_cursor_version().await;
         Ok(())
     }
 
@@ -376,11 +386,25 @@ impl CursorHarness {
         } else {
             None
         };
-        if should_restart_cursor(proxy_changed, current.as_deref(), &service_url, molten_ok) {
+        let (cursor_version, version_changed) = self.cursor_version_change().await;
+        let backend_restart =
+            should_restart_cursor(proxy_changed, current.as_deref(), &service_url, molten_ok);
+        if backend_restart || version_changed {
+            let _control = self.inner.cursor_control.lock().await;
+            if !backend_restart {
+                // Another restart may have recorded this version while we
+                // waited for the lock.
+                let stored = self.inner.store.cursor_version().await.unwrap_or(None);
+                if stored.as_deref() == cursor_version.as_deref() {
+                    return Ok(());
+                }
+            }
             tracing::info!(
                 service_url,
                 proxy_changed,
                 molten_ok,
+                version_changed,
+                version = ?cursor_version,
                 "restarting Cursor to apply local backend settings"
             );
             if let Err(error) = process::stop_cursor().await {
@@ -394,6 +418,7 @@ impl CursorHarness {
                 crate::diagnostics::capture_process_error("launch_cursor", &error);
                 return Err(error);
             }
+            self.record_cursor_version().await;
             return Ok(());
         }
         match current {
@@ -407,6 +432,88 @@ impl CursorHarness {
                 "Cursor is running without a detected --test-backend-url; use the restart button"
             ),
         }
+        Ok(())
+    }
+
+    async fn cursor_version_change(&self) -> (Option<String>, bool) {
+        let version = match process::cursor_version().await {
+            Ok(version) => version,
+            Err(error) => {
+                tracing::warn!(%error, "failed to read Cursor version");
+                None
+            }
+        };
+        let stored = match self.inner.store.cursor_version().await {
+            Ok(version) => version,
+            Err(error) => {
+                tracing::warn!(%error, "failed to read stored Cursor version");
+                return (version, false);
+            }
+        };
+        let changed = cursor_version_changed(stored.as_deref(), version.as_deref());
+        (version, changed)
+    }
+
+    async fn record_cursor_version(&self) {
+        match process::cursor_version().await {
+            Ok(Some(version)) => {
+                if let Err(error) = self.inner.store.set_cursor_version(&version).await {
+                    tracing::warn!(%error, "failed to persist Cursor version");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "failed to read Cursor version"),
+        }
+    }
+
+    /// Cursor's updater relaunches the app without our `--test-backend-url`
+    /// argument. The extension host ignores `http.proxy`, so the first Agent
+    /// run then goes to the official backend and fails with an unknown BYOK
+    /// model ID. Restart Cursor once per version change so it picks the local
+    /// backend up again.
+    async fn ensure_cursor_version(&self) -> Result<()> {
+        if !process::cursor_running().await? {
+            return Ok(());
+        }
+        let (version, changed) = self.cursor_version_change().await;
+        if !changed {
+            return Ok(());
+        }
+        let Some(version) = version else {
+            return Ok(());
+        };
+        let _control = self.inner.cursor_control.lock().await;
+        let stored = self.inner.store.cursor_version().await.unwrap_or(None);
+        if stored.as_deref() == Some(version.as_str()) {
+            return Ok(());
+        }
+        {
+            let mut retry_at = self.inner.cursor_retry_at.lock().await;
+            if retry_at.is_some_and(|at| at.elapsed() < Duration::from_secs(60)) {
+                return Ok(());
+            }
+            *retry_at = Some(std::time::Instant::now());
+        }
+        let Some(service_url) = self.backend_url() else {
+            return Ok(());
+        };
+        tracing::warn!(
+            previous_version = ?stored,
+            %version,
+            "Cursor version changed while running; restarting with the local backend"
+        );
+        if let Err(error) = process::stop_cursor().await {
+            crate::diagnostics::capture_process_error("stop_cursor", &error);
+            return Err(error);
+        }
+        if let Err(error) = self.sync_model_cache().await {
+            tracing::warn!(%error, "failed to sync Cursor model cache before version restart");
+        }
+        if let Err(error) = process::launch_cursor_with_backend(&service_url).await {
+            crate::diagnostics::capture_process_error("launch_cursor", &error);
+            return Err(error);
+        }
+        self.record_cursor_version().await;
         Ok(())
     }
 
@@ -507,9 +614,21 @@ fn should_restart_cursor(
         })
 }
 
+fn cursor_version_changed(stored: Option<&str>, current: Option<&str>) -> bool {
+    current.is_some_and(|version| stored != Some(version))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_managed_local_backend, should_restart_cursor};
+    use super::{cursor_version_changed, is_managed_local_backend, should_restart_cursor};
+
+    #[test]
+    fn restarts_only_when_the_cursor_version_changes() {
+        assert!(cursor_version_changed(None, Some("3.31.15")));
+        assert!(cursor_version_changed(Some("3.26.13"), Some("3.31.15")));
+        assert!(!cursor_version_changed(Some("3.31.15"), Some("3.31.15")));
+        assert!(!cursor_version_changed(None, None));
+    }
 
     #[test]
     fn recognizes_only_managed_local_backend_urls() {

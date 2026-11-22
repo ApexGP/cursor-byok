@@ -13,6 +13,7 @@ const COMMIT_SETTINGS_KEY: &str = "commit_settings";
 const CURSOR_TAKEOVER_ENABLED_KEY: &str = "cursor_takeover_enabled";
 const PRICING_SETTINGS_KEY: &str = "token_pricing";
 pub(crate) const DEFAULT_MODEL_ID_KEY: &str = "default_model";
+const CURSOR_VERSION_KEY: &str = "cursor_version";
 
 /// Embedded default system prompts for commit message generation.
 pub const DEFAULT_COMMIT_PROMPT_ZH_CN: &str = include_str!("../../prompt/cursor/commit/zh-CN.md");
@@ -237,6 +238,36 @@ impl Store {
              value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms",
         )
         .bind(DEFAULT_MODEL_ID_KEY)
+        .bind(value_json)
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Last Cursor version observed while takeover was active. A change means
+    /// Cursor's updater relaunched it without `--test-backend-url`.
+    pub(crate) async fn cursor_version(&self) -> Result<Option<String>> {
+        let value = sqlx::query_scalar::<_, String>(
+            "SELECT value_json FROM service_settings WHERE setting_key = ?",
+        )
+        .bind(CURSOR_VERSION_KEY)
+        .fetch_optional(&self.pool)
+        .await?;
+        value
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .unwrap_or(Ok(None))
+    }
+
+    pub(crate) async fn set_cursor_version(&self, version: &str) -> Result<()> {
+        let value_json = serde_json::to_string(version)?;
+        let _write = self.writes.lock().await;
+        sqlx::query(
+            "INSERT INTO service_settings(setting_key, value_json, updated_at_ms) VALUES (?, ?, ?)
+             ON CONFLICT(setting_key) DO UPDATE SET
+             value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(CURSOR_VERSION_KEY)
         .bind(value_json)
         .bind(now_ms())
         .execute(&self.pool)
