@@ -24,6 +24,87 @@ test("builds a release note from commits since the previous tag", () => {
   assert.match(notes.markdown, /- Generate release notes in CI \(`def5678`\)/);
   assert.equal(notes.range, "v1.0.2...v1.0.3");
   assert.match(notes.markdown, /https:\/\/github\.com\/ApexGP\/cursor-byok\/compare\/v1\.0\.2\.\.\.v1\.0\.3/);
+  assert.doesNotMatch(notes.markdown, /Thanks to contributors/);
+});
+
+test("credits pull request authors on their commits and in a thanks section", () => {
+  const notes = buildReleaseNotes({
+    version: "1.0.9",
+    repository: "ApexGP/cursor-byok",
+    previousTag: "v1.0.8",
+    commits: [
+      {
+        hash: "980c547",
+        fullHash: "980c547aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        subject: "fix(cursor): accept binary BidiAppend payloads",
+      },
+      {
+        hash: "6ea72fc",
+        fullHash: "6ea72fcbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        subject: "fix(process): treat a gone Cursor process as a successful stop",
+      },
+    ],
+    pullRequests: [
+      {
+        number: 3,
+        title: "fix(cursor): accept binary BidiAppend payloads",
+        author: { login: "xiaochaodada" },
+        url: "https://github.com/ApexGP/cursor-byok/pull/3",
+        commits: ["980c547aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      },
+    ],
+  });
+
+  assert.match(
+    notes.markdown,
+    /- fix\(cursor\): accept binary BidiAppend payloads \(`980c547`\) — thanks @xiaochaodada/,
+  );
+  assert.doesNotMatch(notes.markdown, /6ea72fc`\) — thanks/);
+  assert.match(notes.markdown, /### Thanks to contributors/);
+  assert.match(
+    notes.markdown,
+    /- @xiaochaodada for \[#3\]\(https:\/\/github\.com\/ApexGP\/cursor-byok\/pull\/3\) — fix\(cursor\): accept binary BidiAppend payloads/,
+  );
+  assert.equal(notes.contributors.length, 1);
+});
+
+test("groups multiple pull requests from the same contributor", () => {
+  const notes = buildReleaseNotes({
+    version: "1.0.9",
+    repository: "ApexGP/cursor-byok",
+    previousTag: "v1.0.8",
+    commits: [],
+    pullRequests: [
+      {
+        number: 3,
+        title: "First fix",
+        author: "alice",
+        url: "https://github.com/ApexGP/cursor-byok/pull/3",
+        commits: [],
+      },
+      {
+        number: 5,
+        title: "Second fix",
+        author: { login: "alice" },
+        url: "not-a-github-url",
+        commits: [],
+      },
+      {
+        number: 7,
+        title: "Invalid author",
+        author: { login: "not a login" },
+        url: "https://github.com/ApexGP/cursor-byok/pull/7",
+        commits: [],
+      },
+    ],
+  });
+
+  assert.match(
+    notes.markdown,
+    /- @alice for \[#3\]\(https:\/\/github\.com\/ApexGP\/cursor-byok\/pull\/3\), \[#5\]\(https:\/\/github\.com\/ApexGP\/cursor-byok\/pull\/5\)/,
+  );
+  assert.doesNotMatch(notes.markdown, /not a login/);
+  assert.equal(notes.contributors.length, 1);
 });
 
 test("marks beta versions and ignores empty commit subjects", () => {
