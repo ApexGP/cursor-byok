@@ -21,6 +21,7 @@ use cursor_server::{
         proto::{agent::v1 as pb, aiserver::v1 as ai},
     },
     cursor::transport::TransportRegistry,
+    model::{ModelConfigInput, ModelType, OPENAI_CHAT_ENDPOINT},
     network::NetworkClients,
 };
 use flate2::{write::GzEncoder, Compression};
@@ -137,4 +138,84 @@ async fn bidi_append_gzip_body_is_decompressed_before_protobuf_decode() {
     let text = std::str::from_utf8(&body).unwrap();
     assert!(text.contains("BidiAppend contains no AgentClientMessage"));
     assert!(!text.contains("protobuf decode error"));
+}
+
+#[tokio::test]
+async fn bidi_append_binary_payload_reaches_the_local_transport() {
+    let (_directory, store) = fixtures::temp_store().await;
+    let model = store
+        .create_model(&ModelConfigInput {
+            sort_order: 0,
+            display_name: "Local Model".into(),
+            group_name: None,
+            model_type: ModelType::OpenAi,
+            base_url: "https://provider.example/v1".into(),
+            use_full_url: false,
+            api_key: "upstream".into(),
+            tooltip_data: "test".into(),
+            model_id: "upstream-model".into(),
+            reasoning_effort: None,
+            openai_endpoint: OPENAI_CHAT_ENDPOINT.into(),
+            openai_extra_params_enabled: false,
+            openai_extra_params: serde_json::json!({}),
+            custom_headers_enabled: false,
+            custom_headers: serde_json::json!({}),
+            anthropic_extra_params_enabled: false,
+            anthropic_extra_params: serde_json::json!({}),
+            context_window_tokens: None,
+            max_completion_tokens: None,
+            anthropic_max_tokens: None,
+            anthropic_thinking_effort: None,
+            thinking_budget_tokens: None,
+        })
+        .await
+        .unwrap();
+    let assets = PromptAssets::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("prompt/cursor")
+            .as_path(),
+    )
+    .unwrap();
+    let clients = NetworkClients::new(store.clone());
+    let registry = TransportRegistry::new(
+        store,
+        Arc::new(fake_provider::FakeProvider::default()),
+        PromptCompiler::new(assets),
+    );
+    let run = pb::AgentRunRequest {
+        requested_model: Some(pb::RequestedModel {
+            model_id: model.model_hash.clone(),
+            ..Default::default()
+        }),
+        conversation_id: Some("binary-conversation".into()),
+        ..Default::default()
+    };
+    let message = pb::AgentClientMessage {
+        message: Some(pb::agent_client_message::Message::RunRequest(run)),
+    };
+    let wire = ai::BidiAppendRequest {
+        request_id: Some(ai::BidiRequestId {
+            request_id: "binary-request".into(),
+        }),
+        append_seqno: 1,
+        // Leave a malformed hex field behind to prove the binary field wins.
+        data: "not hex".into(),
+        data_binary: message.encode_to_vec(),
+    }
+    .encode_to_vec();
+
+    let response = cursor::router(registry, clients)
+        .unwrap()
+        .oneshot(
+            Request::post("/aiserver.v1.BidiService/BidiAppend")
+                .header(header::CONTENT_TYPE, "application/proto")
+                .body(Body::from(wire))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert!(body.is_empty());
 }

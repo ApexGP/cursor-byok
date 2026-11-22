@@ -180,7 +180,9 @@ pub fn decode(request: &ai::BidiAppendRequest) -> Result<DecodedAppend> {
     // Cursor selects the append wire encoding with its
     // `bidi_append_binary_encoding_disabled` gate. Both fields carry the same
     // serialized `AgentClientMessage`; binary appends use `data_binary`, hex
-    // appends use `data`.
+    // appends use `data`. Cursor sends exactly one, so prefer the binary field
+    // when both are present: a stale or malformed hex value must not mask the
+    // active encoding.
     let decoded_hex;
     let payload: &[u8] = if !request.data_binary.is_empty() {
         &request.data_binary
@@ -357,6 +359,19 @@ mod tests {
         .unwrap();
 
         assert_eq!(decoded.payload_len, encoded.len());
+    }
+
+    #[test]
+    fn rejects_invalid_hex_payload() {
+        let error = decode(&ai::BidiAppendRequest {
+            data: "not hex".into(),
+            request_id: request_id(),
+            ..Default::default()
+        })
+        .err()
+        .expect("invalid hex must fail");
+
+        assert!(error.to_string().contains("invalid BidiAppend hex"));
     }
 
     #[test]
