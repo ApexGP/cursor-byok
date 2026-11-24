@@ -4,7 +4,9 @@ use std::{
     path::Path,
 };
 
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use prost::Message;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
@@ -227,23 +229,43 @@ pub fn compile_context(context: &pb::RequestContext, today: &str) -> String {
         )
     }));
     sections.extend(transcripts);
+    let skill_paths = context
+        .agent_skills
+        .iter()
+        .map(|skill| skill.full_path.as_str())
+        .filter(|path| !path.is_empty())
+        .collect::<HashSet<_>>();
     let skill_contents = context
         .agent_skills
         .iter()
         .map(|skill| skill.content.as_str())
         .filter(|content| !content.is_empty())
         .collect::<HashSet<_>>();
-    let mut rules = context
-        .rules
-        .iter()
-        .chain(context.non_file_rules.iter())
-        .filter(|rule| {
-            !rule.content.trim().is_empty()
-                && !is_skill_rule(rule)
-                && !skill_contents.contains(rule.content.as_str())
-        })
-        .map(|rule| format!("<user_rule>\n{}\n</user_rule>", rule.content))
-        .collect::<Vec<_>>();
+    let mut rules = Vec::new();
+    let mut catalogs = Vec::new();
+    let mut catalogued = HashSet::new();
+    for rule in context.rules.iter().chain(context.non_file_rules.iter()) {
+        if is_skill(rule, &skill_paths, &skill_contents) {
+            continue;
+        }
+        match rule_kind(rule) {
+            RuleKind::Always => push_rule_content(&mut rules, rule),
+            RuleKind::AgentFetched { description } => {
+                if description.trim().is_empty() || rule.full_path.trim().is_empty() {
+                    push_rule_content(&mut rules, rule);
+                    continue;
+                }
+                if catalogued.insert(rule.full_path.as_str()) {
+                    catalogs.push(format!(
+                        "<agent_rule fullPath=\"{}\" description=\"{}\"/>",
+                        xml(&rule.full_path),
+                        xml(description.trim()),
+                    ));
+                }
+            }
+            RuleKind::Globbed { .. } | RuleKind::Manual => {}
+        }
+    }
     rules.extend(
         context
             .cloud_rule
@@ -253,17 +275,17 @@ pub fn compile_context(context: &pb::RequestContext, today: &str) -> String {
     if !rules.is_empty() {
         sections.push(format!("<rules>\n{}\n</rules>", rules.join("\n")));
     }
+    if !catalogs.is_empty() {
+        sections.push(format!(
+            "<agent_rules>\n{}\n</agent_rules>",
+            catalogs.join("\n")
+        ));
+    }
     let skills = context
         .agent_skills
         .iter()
-        .filter(|skill| !skill.disable_model_invocation)
-        .map(|skill| {
-            format!(
-                "<agent_skill fullPath=\"{}\">{}</agent_skill>",
-                xml(&skill.full_path),
-                xml(&skill.description),
-            )
-        })
+        .filter(|skill| !skill.disable_model_invocation && skill.globs.is_empty())
+        .map(skill_entry)
         .collect::<Vec<_>>();
     if !skills.is_empty() {
         sections.push(format!(
@@ -405,6 +427,295 @@ fn is_skill_rule(rule: &pb::CursorRule) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
+}
+
+fn is_skill(
+    rule: &pb::CursorRule,
+    skill_paths: &HashSet<&str>,
+    skill_contents: &HashSet<&str>,
+) -> bool {
+    is_skill_rule(rule)
+        || skill_paths.contains(rule.full_path.as_str())
+        || skill_contents.contains(rule.content.as_str())
+}
+
+fn push_rule_content(rules: &mut Vec<String>, rule: &pb::CursorRule) {
+    if !rule.content.trim().is_empty() {
+        rules.push(format!("<user_rule>\n{}\n</user_rule>", rule.content));
+    }
+}
+
+fn skill_entry(skill: &pb::AgentSkill) -> String {
+    format!(
+        "<agent_skill fullPath=\"{}\">{}</agent_skill>",
+        xml(&skill.full_path),
+        xml(&skill.description),
+    )
+}
+
+/// Cursor's four project-rule shapes. The protocol carries the same split in
+/// `CursorRule.type`; local markdown rules have no metadata and stay always-on.
+#[derive(Clone, Debug, PartialEq)]
+enum RuleKind {
+    Always,
+    AgentFetched { description: String },
+    Globbed { globs: Vec<String> },
+    Manual,
+}
+
+fn rule_kind(rule: &pb::CursorRule) -> RuleKind {
+    if rule.is_required == Some(true) {
+        return RuleKind::Always;
+    }
+    if let Some(kind) = rule.r#type.as_ref().and_then(|kind| kind.r#type.as_ref()) {
+        return match kind {
+            pb::cursor_rule_type::Type::Global(_) => RuleKind::Always,
+            pb::cursor_rule_type::Type::FileGlobbed(part) => {
+                let globs = normalize_globs(&part.globs);
+                if globs.is_empty() {
+                    RuleKind::Always
+                } else {
+                    RuleKind::Globbed { globs }
+                }
+            }
+            pb::cursor_rule_type::Type::AgentFetched(part) => RuleKind::AgentFetched {
+                description: part.description.clone(),
+            },
+            pb::cursor_rule_type::Type::ManuallyAttached(_) => RuleKind::Manual,
+        };
+    }
+    let frontmatter = rule_frontmatter(rule);
+    if frontmatter.always_apply == Some(true) {
+        return RuleKind::Always;
+    }
+    if let Some(globs) = frontmatter.globs.map(GlobsField::into_vec) {
+        if !globs.is_empty() {
+            return RuleKind::Globbed { globs };
+        }
+    }
+    if let Some(description) = frontmatter
+        .description
+        .filter(|description| !description.trim().is_empty())
+    {
+        return RuleKind::AgentFetched { description };
+    }
+    if frontmatter.always_apply == Some(false) {
+        return RuleKind::Manual;
+    }
+    RuleKind::Always
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct RuleFrontmatter {
+    #[serde(rename = "alwaysApply")]
+    always_apply: Option<bool>,
+    globs: Option<GlobsField>,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum GlobsField {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl GlobsField {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::Single(value) => normalize_globs(&[value]),
+            Self::Multiple(values) => normalize_globs(&values),
+        }
+    }
+}
+
+fn rule_frontmatter(rule: &pb::CursorRule) -> RuleFrontmatter {
+    let raw = rule.frontmatter.trim();
+    if raw.is_empty() {
+        return RuleFrontmatter::default();
+    }
+    serde_yaml::from_str(&frontmatter_block(raw)).unwrap_or_default()
+}
+
+/// Accepts both a bare YAML block and a full `---` delimited frontmatter block.
+fn frontmatter_block(raw: &str) -> String {
+    let mut lines = raw.lines();
+    if lines.clone().next().map(str::trim) == Some("---") {
+        lines.next();
+    }
+    lines
+        .take_while(|line| line.trim() != "---")
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_globs(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Workspace-relative paths available to this turn, used for glob attachment.
+#[derive(Debug, Default)]
+pub(crate) struct TurnFiles {
+    relative: Vec<String>,
+}
+
+impl TurnFiles {
+    fn is_empty(&self) -> bool {
+        self.relative.is_empty()
+    }
+
+    fn push(&mut self, path: &str, workspace: &str) {
+        if let Some(path) = workspace_relative(path, workspace) {
+            if !self.relative.contains(&path) {
+                self.relative.push(path);
+            }
+        }
+    }
+}
+
+pub(crate) fn ide_state(user: &pb::UserMessage) -> Option<&pb::invocation_context::IdeState> {
+    match user
+        .selected_context
+        .as_ref()?
+        .invocation_context
+        .as_ref()?
+        .data
+        .as_ref()?
+    {
+        pb::invocation_context::Data::IdeState(state) => Some(state),
+        _ => None,
+    }
+}
+
+pub(crate) fn turn_files(user: &pb::UserMessage, workspace: &str) -> TurnFiles {
+    let mut files = TurnFiles::default();
+    let Some(selected) = user.selected_context.as_ref() else {
+        return files;
+    };
+    if let Some(state) = ide_state(user) {
+        for file in state
+            .visible_files
+            .iter()
+            .chain(state.recently_viewed_files.iter())
+        {
+            files.push(
+                file.relative_path.as_deref().unwrap_or(&file.path),
+                workspace,
+            );
+        }
+    }
+    for file in &selected.files {
+        files.push(
+            file.relative_path.as_deref().unwrap_or(&file.path),
+            workspace,
+        );
+    }
+    for selection in &selected.code_selections {
+        files.push(&selection.path, workspace);
+    }
+    for folder in &selected.folders {
+        files.push(
+            folder.relative_path.as_deref().unwrap_or(&folder.path),
+            workspace,
+        );
+    }
+    files
+}
+
+/// Turn-scoped rules and skills whose globs match the files of this turn.
+pub(crate) fn attached_context(context: &pb::RequestContext, files: &TurnFiles) -> Option<String> {
+    if files.is_empty() {
+        return None;
+    }
+    let skill_paths = context
+        .agent_skills
+        .iter()
+        .map(|skill| skill.full_path.as_str())
+        .filter(|path| !path.is_empty())
+        .collect::<HashSet<_>>();
+    let skill_contents = context
+        .agent_skills
+        .iter()
+        .map(|skill| skill.content.as_str())
+        .filter(|content| !content.is_empty())
+        .collect::<HashSet<_>>();
+    let mut sections = Vec::new();
+    let mut rules = Vec::new();
+    for rule in context.rules.iter().chain(context.non_file_rules.iter()) {
+        if is_skill(rule, &skill_paths, &skill_contents) {
+            continue;
+        }
+        let RuleKind::Globbed { globs } = rule_kind(rule) else {
+            continue;
+        };
+        if glob_matches(&globs, files) {
+            push_rule_content(&mut rules, rule);
+        }
+    }
+    if !rules.is_empty() {
+        sections.push(format!("<rules>\n{}\n</rules>", rules.join("\n")));
+    }
+    let skills = context
+        .agent_skills
+        .iter()
+        .filter(|skill| !skill.disable_model_invocation && !skill.globs.is_empty())
+        .filter(|skill| glob_matches(&normalize_globs(&skill.globs), files))
+        .map(skill_entry)
+        .collect::<Vec<_>>();
+    if !skills.is_empty() {
+        sections.push(format!(
+            "<agent_skills>\n<available_skills>\n{}\n</available_skills>\n</agent_skills>",
+            skills.join("\n")
+        ));
+    }
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
+}
+
+fn glob_matches(globs: &[String], files: &TurnFiles) -> bool {
+    let Some(set) = glob_set(globs) else {
+        return false;
+    };
+    files.relative.iter().any(|file| set.is_match(file))
+}
+
+fn glob_set(globs: &[String]) -> Option<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    let mut added = false;
+    for pattern in normalize_globs(globs) {
+        // `literal_separator` keeps `*` inside one path segment, matching the
+        // rule glob semantics Cursor documents (`*.ts` is root-level only).
+        if let Ok(glob) = GlobBuilder::new(&pattern).literal_separator(true).build() {
+            builder.add(glob);
+            added = true;
+        }
+    }
+    added.then(|| builder.build().ok()).flatten()
+}
+
+fn workspace_relative(path: &str, workspace: &str) -> Option<String> {
+    let path = path.trim().replace('\\', "/");
+    if path.is_empty() {
+        return None;
+    }
+    let workspace = workspace.trim().replace('\\', "/");
+    let workspace = workspace.trim_end_matches('/');
+    let relative = if !workspace.is_empty() && path.starts_with(workspace) {
+        path[workspace.len()..].trim_start_matches('/')
+    } else {
+        path.as_str()
+    };
+    let relative = relative
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .trim_end_matches('/');
+    (!relative.is_empty()).then(|| relative.to_string())
 }
 
 pub fn selected_context(user: &pb::UserMessage) -> Option<String> {
@@ -625,5 +936,264 @@ mod tests {
         let mut context = pb::RequestContext::default();
         merge_local_rules(&mut context, &directory.path().join("nested/rules"));
         assert!(context.non_file_rules.is_empty());
+    }
+
+    fn typed_rule(content: &str, kind: pb::cursor_rule_type::Type) -> pb::CursorRule {
+        pb::CursorRule {
+            full_path: "/repo/.cursor/rules/rule.mdc".into(),
+            content: content.into(),
+            r#type: Some(pb::CursorRuleType { r#type: Some(kind) }),
+            ..Default::default()
+        }
+    }
+
+    fn frontmatter_rule(content: &str, frontmatter: &str) -> pb::CursorRule {
+        pb::CursorRule {
+            full_path: "/repo/.cursor/rules/rule.mdc".into(),
+            content: content.into(),
+            frontmatter: frontmatter.into(),
+            ..Default::default()
+        }
+    }
+
+    fn skill(path: &str, description: &str, content: &str, globs: &[&str]) -> pb::AgentSkill {
+        pb::AgentSkill {
+            full_path: path.into(),
+            description: description.into(),
+            content: content.into(),
+            globs: globs.iter().map(|glob| (*glob).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn turn_files(paths: &[&str]) -> TurnFiles {
+        let mut files = TurnFiles::default();
+        for path in paths {
+            files.push(path, "/repo");
+        }
+        files
+    }
+
+    #[test]
+    fn rule_kind_follows_the_protocol_type() {
+        assert_eq!(
+            rule_kind(&typed_rule(
+                "always",
+                pb::cursor_rule_type::Type::Global(pb::CursorRuleTypeGlobal::default()),
+            )),
+            RuleKind::Always
+        );
+        assert_eq!(
+            rule_kind(&typed_rule(
+                "globbed",
+                pb::cursor_rule_type::Type::FileGlobbed(pb::CursorRuleTypeFileGlobs {
+                    globs: vec!["src/**/*.rs".into()],
+                }),
+            )),
+            RuleKind::Globbed {
+                globs: vec!["src/**/*.rs".into()],
+            }
+        );
+        assert_eq!(
+            rule_kind(&typed_rule(
+                "described",
+                pb::cursor_rule_type::Type::AgentFetched(pb::CursorRuleTypeAgentFetched {
+                    description: "RPC conventions".into(),
+                }),
+            )),
+            RuleKind::AgentFetched {
+                description: "RPC conventions".into(),
+            }
+        );
+        assert_eq!(
+            rule_kind(&typed_rule(
+                "manual",
+                pb::cursor_rule_type::Type::ManuallyAttached(
+                    pb::CursorRuleTypeManuallyAttached::default(),
+                ),
+            )),
+            RuleKind::Manual
+        );
+        assert_eq!(
+            rule_kind(&typed_rule(
+                "empty globs",
+                pb::cursor_rule_type::Type::FileGlobbed(pb::CursorRuleTypeFileGlobs::default()),
+            )),
+            RuleKind::Always,
+            "a file_globbed rule without patterns must not be dropped"
+        );
+    }
+
+    #[test]
+    fn rule_kind_falls_back_to_frontmatter() {
+        assert_eq!(
+            rule_kind(&frontmatter_rule(
+                "body",
+                "---\nalwaysApply: true\nglobs: src/**\n---",
+            )),
+            RuleKind::Always,
+            "alwaysApply wins over globs"
+        );
+        assert_eq!(
+            rule_kind(&frontmatter_rule(
+                "body",
+                "---\nalwaysApply: false\nglobs: src/**/*.tsx, docs/**/*.md\n---",
+            )),
+            RuleKind::Globbed {
+                globs: vec!["src/**/*.tsx".into(), "docs/**/*.md".into()],
+            }
+        );
+        assert_eq!(
+            rule_kind(&frontmatter_rule(
+                "body",
+                "---\nalwaysApply: false\ndescription: RPC conventions\n---",
+            )),
+            RuleKind::AgentFetched {
+                description: "RPC conventions".into(),
+            }
+        );
+        assert_eq!(
+            rule_kind(&frontmatter_rule("body", "---\nalwaysApply: false\n---")),
+            RuleKind::Manual
+        );
+    }
+
+    #[test]
+    fn rule_kind_defaults_to_always_without_metadata() {
+        assert_eq!(rule_kind(&rule("local markdown")), RuleKind::Always);
+        let mut required = rule("team rule");
+        required.is_required = Some(true);
+        assert_eq!(rule_kind(&required), RuleKind::Always);
+    }
+
+    #[test]
+    fn workspace_relative_strips_the_workspace_root() {
+        assert_eq!(
+            workspace_relative("/repo/src/main.rs", "/repo"),
+            Some("src/main.rs".into())
+        );
+        assert_eq!(
+            workspace_relative("C:\\repo\\src\\main.rs", "C:/repo/"),
+            Some("src/main.rs".into())
+        );
+        assert_eq!(
+            workspace_relative("./src/main.rs", ""),
+            Some("src/main.rs".into())
+        );
+        assert_eq!(workspace_relative("   ", "/repo"), None);
+    }
+
+    #[test]
+    fn glob_matching_uses_workspace_relative_paths() {
+        let files = turn_files(&["src/app/main.rs", "docs/readme.md"]);
+        assert!(glob_matches(&["src/**/*.rs".into()], &files));
+        assert!(glob_matches(&["*.rs, docs/**/*.md".into()], &files));
+        assert!(!glob_matches(&["**/*.tsx".into()], &files));
+        assert!(!glob_matches(&["src/*.rs".into()], &files));
+        assert!(!glob_matches(
+            &["src/**/*.rs".into()],
+            &TurnFiles::default()
+        ));
+    }
+
+    #[test]
+    fn compile_context_separates_always_catalog_and_globbed_rules() {
+        let context = pb::RequestContext {
+            rules: vec![
+                typed_rule(
+                    "ALWAYS BODY",
+                    pb::cursor_rule_type::Type::Global(pb::CursorRuleTypeGlobal::default()),
+                ),
+                typed_rule(
+                    "AGENT BODY",
+                    pb::cursor_rule_type::Type::AgentFetched(pb::CursorRuleTypeAgentFetched {
+                        description: "API conventions".into(),
+                    }),
+                ),
+                typed_rule(
+                    "RUST BODY",
+                    pb::cursor_rule_type::Type::FileGlobbed(pb::CursorRuleTypeFileGlobs {
+                        globs: vec!["src/**/*.rs".into()],
+                    }),
+                ),
+                typed_rule(
+                    "MANUAL BODY",
+                    pb::cursor_rule_type::Type::ManuallyAttached(
+                        pb::CursorRuleTypeManuallyAttached::default(),
+                    ),
+                ),
+            ],
+            agent_skills: vec![
+                skill("SKILL.md", "general skill", "SKILL BODY", &[]),
+                skill("scoped/SKILL.md", "ts skill", "TS BODY", &["**/*.ts"]),
+            ],
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24");
+        assert!(text.contains("<user_rule>\nALWAYS BODY\n</user_rule>"));
+        assert!(text.contains(
+            "<agent_rule fullPath=\"/repo/.cursor/rules/rule.mdc\" description=\"API conventions\"/>"
+        ));
+        assert!(!text.contains("AGENT BODY"), "{text}");
+        assert!(!text.contains("RUST BODY"), "{text}");
+        assert!(!text.contains("MANUAL BODY"), "{text}");
+        assert!(text.contains("general skill"));
+        assert!(!text.contains("ts skill"), "{text}");
+    }
+
+    #[test]
+    fn attached_context_includes_only_matching_globs() {
+        let context = pb::RequestContext {
+            rules: vec![typed_rule(
+                "RUST BODY",
+                pb::cursor_rule_type::Type::FileGlobbed(pb::CursorRuleTypeFileGlobs {
+                    globs: vec!["src/**/*.rs".into()],
+                }),
+            )],
+            agent_skills: vec![skill(
+                "scoped/SKILL.md",
+                "ts skill",
+                "TS BODY",
+                &["**/*.ts"],
+            )],
+            ..Default::default()
+        };
+
+        assert!(
+            attached_context(&context, &turn_files(&["docs/readme.md"])).is_none(),
+            "no glob matches means nothing is attached"
+        );
+        let rust = attached_context(&context, &turn_files(&["src/main.rs"])).unwrap();
+        assert!(
+            rust.contains("<user_rule>\nRUST BODY\n</user_rule>"),
+            "{rust}"
+        );
+        assert!(!rust.contains("ts skill"), "{rust}");
+        let typescript = attached_context(&context, &turn_files(&["app/web.ts"])).unwrap();
+        assert!(typescript.contains("ts skill"), "{typescript}");
+        assert!(!typescript.contains("RUST BODY"), "{typescript}");
+    }
+
+    #[test]
+    fn skill_backed_rules_are_projected_once() {
+        let context = pb::RequestContext {
+            rules: vec![pb::CursorRule {
+                full_path: "/repo/.agents/skills/tdd/SKILL.md".into(),
+                content: "SKILL BODY".into(),
+                ..Default::default()
+            }],
+            agent_skills: vec![skill(
+                "/repo/.agents/skills/tdd/SKILL.md",
+                "tdd skill",
+                "SKILL BODY",
+                &[],
+            )],
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24");
+        assert!(text.contains("tdd skill"));
+        assert!(!text.contains("<user_rule>"), "{text}");
     }
 }

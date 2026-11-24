@@ -137,6 +137,7 @@ impl PromptAssets {
 const RUNTIME_VARIABLES: &[&str] = &[
     "OPEN_FILES",
     "SELECTED_CONTEXT",
+    "ATTACHED_RULES",
     "ACTION_CONTEXT",
     "TIMESTAMP",
     "USER_QUERY",
