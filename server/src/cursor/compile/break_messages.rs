@@ -193,6 +193,15 @@ async fn compile_with_timestamp(
     compiler: &PromptCompiler,
     blobs: &BlobSynchronizer,
 ) -> Result<CanonicalMessage> {
+    let workspace = request_context
+        .env
+        .as_ref()
+        .and_then(|env| env.workspace_paths.first())
+        .map(String::as_str)
+        .unwrap_or_default();
+    let attached_rules =
+        context::attached_context(request_context, &context::turn_files(user, workspace))
+            .unwrap_or_default();
     let mut values = BTreeMap::from([
         ("OPEN_FILES", section(open_files(user))),
         (
@@ -204,6 +213,7 @@ async fn compile_with_timestamp(
                     .unwrap_or_default(),
             ),
         ),
+        ("ATTACHED_RULES", section(attached_rules)),
         ("ACTION_CONTEXT", section(action_context.to_string())),
         ("TIMESTAMP", timestamp),
         ("USER_QUERY", user.text.clone()),
@@ -310,16 +320,7 @@ fn section(value: String) -> String {
 }
 
 fn open_files(user: &pb::UserMessage) -> String {
-    let Some(ide) = user
-        .selected_context
-        .as_ref()
-        .and_then(|selected| selected.invocation_context.as_ref())
-        .and_then(|invocation| invocation.data.as_ref())
-        .and_then(|data| match data {
-            pb::invocation_context::Data::IdeState(ide) => Some(ide),
-            _ => None,
-        })
-    else {
+    let Some(ide) = context::ide_state(user) else {
         return String::new();
     };
     if ide.visible_files.is_empty() && ide.recently_viewed_files.is_empty() {

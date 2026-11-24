@@ -28,6 +28,7 @@ Do not solve prefix instability independently in each provider adapter. Produce 
 - When no compaction occurs, the complete provider-visible history from turn N must be an exact structural prefix of turn N+1. Never edit, remove, merge, reorder, renormalize, or regenerate an earlier message.
 - Keep `PromptSpec.instructions` and the stable tool prefix byte-stable when their inputs have not changed. Deterministic ordering is required; do not use unordered iteration in provider-visible output.
 - Separate conversation/request context from the per-turn runtime message. The runtime message contains current-turn material such as the user query, selected context, open files, action context, mode reminders, and timestamp.
+- Treat glob-scoped rules and skills as turn material: their content depends on the files in the turn, so project them into the runtime message instead of rewriting the request context. The request context keeps only always-applied rules, agent-decided rule descriptions, and unscoped skill descriptions.
 - Project rules, skills, subagents, environment/Git context, and MCP metadata as a stable `request-context:*` message:
   - append it on the first applicable turn;
   - do not append it again when its compiled content is identical to the latest projected request context;
@@ -61,6 +62,7 @@ Cover the affected behavior with structural assertions, not token-count estimate
 
 - Two turns with identical request context: the first request history is an exact prefix of the second, the system instructions are identical, and only one `request-context:*` message exists.
 - Changed context: one new context message appears at the tail before the new runtime query; all earlier messages remain unchanged.
+- Opening different files with only glob-scoped rules or skills affected changes the runtime message and leaves the request-context message untouched.
 - Context reversion `A → B → A`: three distinct context events are retained in order.
 - Retry of one runtime event: no duplicate or conflicting context message is persisted.
 - Checkpoint round-trip: request-context identity and content survive encode/hydrate.

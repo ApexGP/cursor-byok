@@ -362,6 +362,7 @@ fn every_captured_mode_owns_and_renders_its_runtime_template() {
     let values = BTreeMap::from([
         ("OPEN_FILES", String::new()),
         ("SELECTED_CONTEXT", String::new()),
+        ("ATTACHED_RULES", String::new()),
         ("ACTION_CONTEXT", String::new()),
         ("TIMESTAMP", "Sunday, Aug 16, 2026, 11:31 PM (UTC+8)".into()),
         ("USER_QUERY", "question".into()),
@@ -377,6 +378,8 @@ fn every_captured_mode_owns_and_renders_its_runtime_template() {
         (Mode::Multitask, "The user has engaged **Multitask Mode**"),
     ] {
         let rendered = compiler.runtime_message(mode, &values).unwrap();
+        // Windows checkouts convert the embedded templates to CRLF.
+        let rendered = rendered.replace("\r\n", "\n");
         assert!(rendered.contains(marker), "missing {mode:?} marker");
         assert!(rendered.contains("<user_query>\nquestion\n</user_query>"));
         assert_eq!(rendered.matches("<user_query>").count(), 1);
