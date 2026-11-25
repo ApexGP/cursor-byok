@@ -159,6 +159,9 @@ pub(crate) async fn prepare(
             .collect::<Vec<_>>(),
         request.suppress_subagent_progress_update_tool == Some(true),
     )?;
+    if checkpoint_mode != Mode::Compaction && context::meta_tools_enabled(&request_context) {
+        compiler.ensure_mcp_discovery_tool(&mut checkpoint_prompt);
+    }
     if subagents_disabled {
         checkpoint_prompt.tools.retain(|tool| tool.name != "Task");
     }

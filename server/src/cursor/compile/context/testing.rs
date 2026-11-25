@@ -40,3 +40,39 @@ pub(super) fn skill(
         ..Default::default()
     }
 }
+
+pub(super) fn mcp_descriptor(
+    identifier: &str,
+    name: &str,
+    tools: &[&str],
+    instructions: Option<&str>,
+) -> pb::McpDescriptor {
+    pb::McpDescriptor {
+        server_identifier: identifier.into(),
+        server_name: name.into(),
+        server_use_instructions: instructions.map(str::to_string),
+        tools: tools
+            .iter()
+            .map(|tool| pb::McpToolDescriptor {
+                tool_name: (*tool).into(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+pub(super) fn mcp_tool(
+    name: &str,
+    provider_identifier: &str,
+    tool_name: &str,
+) -> pb::McpToolDefinition {
+    pb::McpToolDefinition {
+        name: name.into(),
+        provider_identifier: provider_identifier.into(),
+        tool_name: tool_name.into(),
+        description: format!("{tool_name} description"),
+        input_schema_json: Some(r#"{"type":"object","properties":{}}"#.into()),
+        ..Default::default()
+    }
+}
