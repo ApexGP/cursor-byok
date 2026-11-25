@@ -14,13 +14,13 @@ use std::{
     time::Duration,
 };
 
-use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 use sqlx::{sqlite::SqliteConnectOptions, Connection, Row, SqliteConnection};
 
 use crate::{
-    cursor::services::model_catalog::cursor_catalog_entries, model::ModelConfig, store::Store,
+    cursor::services::{analytics, model_catalog::cursor_catalog_entries},
+    model::ModelConfig,
+    store::Store,
     Error, Result,
 };
 
@@ -28,16 +28,12 @@ use super::account;
 
 const APP_USER_KEY: &str =
     "src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser";
+const ACCESS_TOKEN_KEY: &str = "cursorAuth/accessToken";
 const CURSOR_SERVER_CONFIG_KEY: &str = "cursorai/serverConfig";
 const STATSIG_BOOTSTRAP_KEY: &str = "workbench.experiments.statsigBootstrap";
 const SYNCED_IDS_KEY: &str = "cursorByokModelIds";
 const BACKUP_EXTENSION: &str = "vscdb.cursor-byok.bak";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const AGENT_HOST_GATE: &str = "cursor_agent_host";
-const AGENT_WEBSOCKET_GATE: &str = "nal_websocket_client";
-const AGENT_RETRIES_GATE: &str = "nal_agent_retries";
-const META_MCP_TOOL_GATE: &str = "meta_mcp_tool";
-const MCP_META_SLIM_GATE: &str = "mcp_meta_tool_slim_descriptors";
 
 /// Serializes the read-modify-write of Cursor's single applicationUser JSON.
 /// Concurrent model CRUD would otherwise race on stale model snapshots and
@@ -184,45 +180,37 @@ pub(crate) async fn sync_at_with_service(
 
 /// Cursor loads `workbench.experiments.statsigBootstrap` before the local
 /// `BootstrapStatsig` response is applied, so the agent-host, WebSocket, and
-/// MCP meta gates must also be patched in this persisted cache. The cache is
-/// otherwise server-driven.
+/// MCP meta gates must also be patched (or seeded when absent) in this
+/// persisted cache with a `user.userID` matching the active JWT subject.
 async fn patch_statsig_bootstrap(path: &Path) -> Result<()> {
     let options = SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(false)
         .busy_timeout(BUSY_TIMEOUT);
     let mut connection = SqliteConnection::connect_with(&options).await?;
+    let token_row = sqlx::query("SELECT CAST(value AS TEXT) AS value FROM ItemTable WHERE key = ?")
+        .bind(ACCESS_TOKEN_KEY)
+        .fetch_optional(&mut connection)
+        .await?;
+    let auth_subject = token_row
+        .and_then(|row| row.try_get::<String, _>("value").ok())
+        .and_then(|token| account::jwt_subject(&token));
     let row = sqlx::query("SELECT CAST(value AS TEXT) AS value FROM ItemTable WHERE key = ?")
         .bind(STATSIG_BOOTSTRAP_KEY)
         .fetch_optional(&mut connection)
         .await?;
-    let Some(row) = row else {
-        return Ok(());
+    let seeded = row.is_none();
+    let root = match row {
+        Some(row) => {
+            let text: String = row.try_get("value")?;
+            let mut parsed: Value = serde_json::from_str(&text)
+                .map_err(|error| Error::Config(format!("parse Cursor Statsig cache: {error}")))?;
+            analytics::reconcile_local_statsig_user(&mut parsed, auth_subject.as_deref());
+            analytics::patch_statsig_gates(&mut parsed)?;
+            parsed
+        }
+        None => analytics::local_statsig_bootstrap(auth_subject.as_deref())?,
     };
-    let text: String = row.try_get("value")?;
-    let mut root: Value = serde_json::from_str(&text)
-        .map_err(|error| Error::Config(format!("parse Cursor Statsig cache: {error}")))?;
-    let host_key = statsig_key(&root, AGENT_HOST_GATE);
-    let websocket_key = statsig_key(&root, AGENT_WEBSOCKET_GATE);
-    let retries_key = statsig_key(&root, AGENT_RETRIES_GATE);
-    let meta_mcp_key = statsig_key(&root, META_MCP_TOOL_GATE);
-    let meta_slim_key = statsig_key(&root, MCP_META_SLIM_GATE);
-    let gates = root
-        .get_mut("feature_gates")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| Error::Config("Cursor Statsig cache has no feature_gates".into()))?;
-    set_gate(gates, &host_key, false);
-    set_gate(gates, &websocket_key, false);
-    set_gate(gates, &retries_key, true);
-    set_gate(gates, &meta_mcp_key, true);
-    set_gate(gates, &meta_slim_key, true);
-    if let Some(object) = root.as_object_mut() {
-        object.insert("has_updates".into(), Value::Bool(true));
-        object.insert(
-            "time".into(),
-            (chrono::Utc::now().timestamp_millis() as u64).into(),
-        );
-    }
     let updated = serde_json::to_string(&root)?;
     sqlx::query("INSERT OR REPLACE INTO ItemTable(key, value) VALUES(?, ?)")
         .bind(STATSIG_BOOTSTRAP_KEY)
@@ -230,11 +218,8 @@ async fn patch_statsig_bootstrap(path: &Path) -> Result<()> {
         .execute(&mut connection)
         .await?;
     tracing::info!(
-        agent_host_key = %host_key,
-        agent_websocket_key = %websocket_key,
-        retries_key = %retries_key,
-        meta_mcp_key = %meta_mcp_key,
-        meta_slim_key = %meta_slim_key,
+        seeded,
+        auth_subject = auth_subject.as_deref().unwrap_or(account::SUBJECT),
         "patched Cursor Statsig cache (agent host + websocket disabled, MCP meta enabled)"
     );
     Ok(())
@@ -279,47 +264,6 @@ async fn patch_server_config_cache(path: &Path, service_url: &str) -> Result<()>
         "pinned Cursor server-config cache agent URLs to the local service"
     );
     Ok(())
-}
-
-fn set_gate(gates: &mut Map<String, Value>, key: &str, value: bool) {
-    let entry = gates
-        .entry(key.to_owned())
-        .or_insert_with(|| serde_json::json!({ "name": key }));
-    if let Some(object) = entry.as_object_mut() {
-        object.insert("name".into(), key.into());
-        object.insert("value".into(), value.into());
-        object
-            .entry("rule_id")
-            .or_insert_with(|| "local_enabled".into());
-        object
-            .entry("ruleID")
-            .or_insert_with(|| "local_enabled".into());
-        object.entry("id_type").or_insert_with(|| "userID".into());
-        object.entry("idType").or_insert_with(|| "userID".into());
-        object
-            .entry("secondary_exposures")
-            .or_insert_with(|| Value::Array(Vec::new()));
-        object
-            .entry("secondaryExposures")
-            .or_insert_with(|| Value::Array(Vec::new()));
-    }
-}
-
-fn statsig_key(root: &Value, name: &str) -> String {
-    match root.get("hash_used").and_then(Value::as_str) {
-        Some("djb2") => djb2(name),
-        Some("sha256") => STANDARD.encode(Sha256::digest(name.as_bytes())),
-        _ => name.to_owned(),
-    }
-}
-
-fn djb2(value: &str) -> String {
-    value
-        .encode_utf16()
-        .fold(0_u32, |hash, character| {
-            hash.wrapping_mul(31).wrapping_add(u32::from(character))
-        })
-        .to_string()
 }
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -587,22 +531,6 @@ mod tests {
         assert!(!path.with_extension(BACKUP_EXTENSION).exists());
     }
 
-    #[test]
-    fn statsig_cache_keys_follow_the_hash_mode() {
-        assert_eq!(
-            statsig_key(&json!({ "hash_used": "none" }), AGENT_HOST_GATE),
-            AGENT_HOST_GATE
-        );
-        assert_eq!(
-            statsig_key(&json!({ "hash_used": "djb2" }), AGENT_HOST_GATE),
-            djb2(AGENT_HOST_GATE)
-        );
-        assert_eq!(
-            statsig_key(&json!({ "hash_used": "sha256" }), AGENT_HOST_GATE),
-            STANDARD.encode(Sha256::digest(AGENT_HOST_GATE.as_bytes()))
-        );
-    }
-
     #[tokio::test]
     async fn disables_agent_host_in_persisted_statsig_cache() {
         let directory = tempfile::tempdir().unwrap();
@@ -615,13 +543,15 @@ mod tests {
             }),
         )
         .await;
-        let host_key = djb2(AGENT_HOST_GATE);
-        let websocket_key = djb2(AGENT_WEBSOCKET_GATE);
-        let retries_key = djb2(AGENT_RETRIES_GATE);
-        let meta_mcp_key = djb2(META_MCP_TOOL_GATE);
-        let meta_slim_key = djb2(MCP_META_SLIM_GATE);
+        let host_key = analytics::djb2("cursor_agent_host");
+        let websocket_key = analytics::djb2("nal_websocket_client");
+        let retries_key = analytics::djb2("nal_agent_retries");
+        let meta_mcp_key = analytics::djb2("meta_mcp_tool");
+        let meta_slim_key = analytics::djb2("mcp_meta_tool_slim_descriptors");
+        let input_schema_json_key = analytics::djb2("mcp_input_schema_json");
         let statsig = json!({
             "hash_used": "djb2",
+            "user": { "userID": "auth0|user_official" },
             "feature_gates": {
                 host_key.clone(): { "name": host_key, "value": true },
                 websocket_key.clone(): { "name": websocket_key, "value": true },
@@ -653,12 +583,140 @@ mod tests {
                 .await
                 .unwrap();
         let statsig: Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(statsig["user"]["userID"], "auth0|user_official");
         assert_eq!(statsig["feature_gates"][host_key]["value"], false);
         assert_eq!(statsig["feature_gates"][websocket_key]["value"], false);
         assert_eq!(statsig["feature_gates"][retries_key]["value"], true);
         assert_eq!(statsig["feature_gates"][meta_mcp_key]["value"], true);
         assert_eq!(statsig["feature_gates"][meta_slim_key]["value"], true);
+        assert_eq!(
+            statsig["feature_gates"][input_schema_json_key]["value"],
+            true
+        );
         assert_eq!(statsig["has_updates"], true);
+    }
+
+    #[tokio::test]
+    async fn repairs_legacy_local_ultra_user_and_seeds_missing_statsig_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.vscdb");
+        seed(
+            &path,
+            json!({
+                "availableDefaultModels2": [],
+                "aiSettings": {},
+            }),
+        )
+        .await;
+        let token = account::local_token().unwrap();
+        let legacy = json!({
+            "hash_used": "none",
+            "user": {
+                "userID": "local_ultra",
+                "customIDs": { "localUserID": "local_ultra" }
+            },
+            "sdkParams": { "stableID": "local_ultra" },
+            "feature_gates": {},
+            "has_updates": true,
+        });
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+        sqlx::query("INSERT OR REPLACE INTO ItemTable(key, value) VALUES(?, ?)")
+            .bind(ACCESS_TOKEN_KEY)
+            .bind(&token)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT OR REPLACE INTO ItemTable(key, value) VALUES(?, ?)")
+            .bind(STATSIG_BOOTSTRAP_KEY)
+            .bind(legacy.to_string())
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        drop(connection);
+
+        sync_at(&path, &[model()]).await.unwrap();
+
+        let mut connection = SqliteConnection::connect(&format!("sqlite:{}", path.display()))
+            .await
+            .unwrap();
+        let value: String =
+            sqlx::query_scalar("SELECT CAST(value AS TEXT) FROM ItemTable WHERE key = ?")
+                .bind(STATSIG_BOOTSTRAP_KEY)
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        let statsig: Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(statsig["user"]["userID"], account::SUBJECT);
+        assert_eq!(
+            statsig["user"]["customIDs"]["localUserID"],
+            account::SUBJECT
+        );
+        assert_eq!(statsig["sdkParams"]["stableID"], account::SUBJECT);
+        assert_eq!(statsig["feature_gates"]["meta_mcp_tool"]["value"], true);
+        assert_eq!(
+            statsig["feature_gates"]["mcp_meta_tool_slim_descriptors"]["value"],
+            true
+        );
+
+        // Removing the row seeds a fresh local bootstrap on the next sync.
+        sqlx::query("DELETE FROM ItemTable WHERE key = ?")
+            .bind(STATSIG_BOOTSTRAP_KEY)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        drop(connection);
+
+        sync_at(&path, &[model()]).await.unwrap();
+
+        let mut connection = SqliteConnection::connect(&format!("sqlite:{}", path.display()))
+            .await
+            .unwrap();
+        let seeded: String =
+            sqlx::query_scalar("SELECT CAST(value AS TEXT) FROM ItemTable WHERE key = ?")
+                .bind(STATSIG_BOOTSTRAP_KEY)
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        let statsig: Value = serde_json::from_str(&seeded).unwrap();
+        assert_eq!(statsig["user"]["userID"], account::SUBJECT);
+        assert_eq!(statsig["feature_gates"]["meta_mcp_tool"]["value"], true);
+    }
+
+    #[tokio::test]
+    async fn malformed_statsig_cache_does_not_abort_model_sync() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.vscdb");
+        seed(
+            &path,
+            json!({
+                "availableDefaultModels2": [],
+                "aiSettings": {},
+            }),
+        )
+        .await;
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+        sqlx::query("INSERT OR REPLACE INTO ItemTable(key, value) VALUES(?, ?)")
+            .bind(ACCESS_TOKEN_KEY)
+            .bind("not-a-jwt")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT OR REPLACE INTO ItemTable(key, value) VALUES(?, ?)")
+            .bind(STATSIG_BOOTSTRAP_KEY)
+            .bind("{broken-json")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        drop(connection);
+
+        let result = sync_at(&path, &[model()]).await.unwrap();
+        assert_eq!(result.model_ids, vec!["local-model"]);
     }
 
     #[tokio::test]
