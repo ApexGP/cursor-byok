@@ -35,11 +35,20 @@ pub(crate) fn cursor_state_db_path() -> Result<std::path::PathBuf> {
     account::state_db_path()
 }
 
+pub(crate) const LOCAL_CURSOR_SUBJECT: &str = account::SUBJECT;
+
 pub(crate) fn request_uses_local_cursor_token(headers: &axum::http::HeaderMap) -> bool {
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .is_some_and(account::is_local_cursor_authorization)
+}
+
+pub(crate) fn request_cursor_subject(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(account::authorization_subject)
 }
 
 #[cfg(test)]

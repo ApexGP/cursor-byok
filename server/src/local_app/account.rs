@@ -9,7 +9,7 @@ use crate::{Error, Result};
 
 const EMAIL: &str = "cursor@ai.com";
 const SIGN_UP_TYPE: &str = "Google";
-const SUBJECT: &str = "cursor-local-user";
+pub(crate) const SUBJECT: &str = "cursor-local-user";
 const MEMBERSHIP_TYPE: &str = "ultra";
 const SUBSCRIPTION_STATUS: &str = "active";
 
@@ -96,6 +96,34 @@ pub(crate) fn is_local_cursor_authorization(authorization: &str) -> bool {
         .is_some_and(is_local_cursor_token)
 }
 
+pub(crate) fn authorization_subject(authorization: &str) -> Option<String> {
+    let (scheme, token) = authorization.trim().split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    jwt_subject(token.trim())
+}
+
+/// Extracts the JWT `sub` claim without verifying the signature, matching how
+/// Cursor's `getAuthIdFromToken` derives the Statsig `userID`.
+pub(crate) fn jwt_subject(token: &str) -> Option<String> {
+    let mut parts = token.split('.');
+    let _header = parts.next()?;
+    let payload = parts.next()?.trim_end_matches('=');
+    let _signature = parts.next()?;
+    if parts.next().is_some() || payload.is_empty() {
+        return None;
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    value
+        .get("sub")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|subject| !subject.is_empty())
+        .map(str::to_owned)
+}
+
 fn is_local_cursor_token(token: &str) -> bool {
     local_token().is_ok_and(|local| local == token)
 }
@@ -171,5 +199,51 @@ mod tests {
         ));
         assert!(!is_local_cursor_token("official-cursor-token"));
         assert!(!is_local_cursor_token(""));
+    }
+
+    #[test]
+    fn extracts_jwt_subject_from_valid_and_rejects_malformed_tokens() {
+        let local = local_token().unwrap();
+        assert_eq!(jwt_subject(&local).as_deref(), Some(SUBJECT));
+        assert_eq!(
+            authorization_subject(&format!("Bearer {local}")).as_deref(),
+            Some(SUBJECT)
+        );
+        assert_eq!(
+            authorization_subject(&format!("bearer {local}")).as_deref(),
+            Some(SUBJECT)
+        );
+
+        let official_payload = URL_SAFE_NO_PAD.encode(br#"{"sub":"auth0|user_123"}"#);
+        let official = format!("eyJ0eXAiOiJKV1QifQ.{official_payload}.sig");
+        assert_eq!(jwt_subject(&official).as_deref(), Some("auth0|user_123"));
+
+        // Padded base64url payload is also accepted.
+        let padded_payload = format!("{}=", URL_SAFE_NO_PAD.encode(br#"{"sub":"auth0|padded"}"#));
+        assert_eq!(
+            jwt_subject(&format!("hdr.{padded_payload}.sig")).as_deref(),
+            Some("auth0|padded")
+        );
+
+        // Malformed inputs safely yield None.
+        let blank_sub = URL_SAFE_NO_PAD.encode(br#"{"sub":"   "}"#);
+        let numeric_sub = URL_SAFE_NO_PAD.encode(br#"{"sub":42}"#);
+        let not_object = URL_SAFE_NO_PAD.encode(br#"["sub"]"#);
+        let not_json = URL_SAFE_NO_PAD.encode(b"{bad-json");
+        for malformed in [
+            "",
+            "not-a-jwt",
+            "only.two",
+            "too.many.dots.here",
+            "hdr.!!!not-base64!!!.sig",
+            &format!("hdr.{blank_sub}.sig"),
+            &format!("hdr.{numeric_sub}.sig"),
+            &format!("hdr.{not_object}.sig"),
+            &format!("hdr.{not_json}.sig"),
+        ] {
+            assert_eq!(jwt_subject(malformed), None, "token={malformed:?}");
+        }
+        assert_eq!(authorization_subject(&local), None);
+        assert_eq!(authorization_subject(&format!("Basic {local}")), None);
     }
 }
