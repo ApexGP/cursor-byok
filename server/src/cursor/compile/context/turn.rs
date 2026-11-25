@@ -129,9 +129,10 @@ fn workspace_relative(path: &str, workspaces: &[String]) -> Option<String> {
         if rest.is_empty() {
             return None;
         }
-        if let Some(rest) = rest.strip_prefix('/').and_then(normalize_relative) {
-            return Some(rest);
-        }
+        let Some(rest) = rest.strip_prefix('/') else {
+            continue;
+        };
+        return normalize_relative(rest);
     }
     normalize_relative(&path)
 }
@@ -441,5 +442,173 @@ mod tests {
             attached_context(&context, &TurnFiles::from_relative(&["app/web.ts"])).unwrap();
         assert!(typescript.contains("ts skill"), "{typescript}");
         assert!(!typescript.contains("RUST BODY"), "{typescript}");
+    }
+
+    #[test]
+    fn workspace_relative_handles_malformed_paths() {
+        let repo = workspaces(&["/repo"]);
+        assert_eq!(workspace_relative("", &repo), None);
+        assert_eq!(workspace_relative("   ", &repo), None);
+        assert_eq!(workspace_relative("/repo", &repo), None);
+        assert_eq!(
+            workspace_relative("/repo/", &repo),
+            None,
+            "a workspace root with a trailing separator is not a file"
+        );
+        assert_eq!(workspace_relative("/repo//", &repo), None);
+        assert_eq!(
+            workspace_relative("\\repo\\\\src\\main.rs", &repo),
+            Some("src/main.rs".into()),
+            "mixed and repeated separators normalize at the boundary"
+        );
+        assert_eq!(
+            workspace_relative("/repo/src//main.rs", &repo),
+            Some("src//main.rs".into()),
+            "internal repeated separators are preserved"
+        );
+        assert_eq!(
+            workspace_relative("/项目/src/主.rs", &workspaces(&["/项目"])),
+            Some("src/主.rs".into())
+        );
+        assert_eq!(
+            workspace_relative("src/main.rs", &workspaces(&["", "/repo"])),
+            Some("src/main.rs".into()),
+            "empty workspace entries are skipped"
+        );
+    }
+
+    #[test]
+    fn workspace_relative_uses_the_first_matching_root() {
+        assert_eq!(
+            workspace_relative(
+                "/repo/nested/src/main.rs",
+                &workspaces(&["/repo", "/repo/nested"])
+            ),
+            Some("nested/src/main.rs".into()),
+            "root order decides when roots are nested"
+        );
+    }
+
+    #[test]
+    fn turn_files_ignore_empty_and_duplicate_paths() {
+        let user = user(
+            pb::SelectedContext {
+                files: vec![
+                    pb::SelectedFile {
+                        path: String::new(),
+                        relative_path: None,
+                        ..Default::default()
+                    },
+                    pb::SelectedFile {
+                        path: "/repo/src/a.rs".into(),
+                        relative_path: Some("   ".into()),
+                        ..Default::default()
+                    },
+                ],
+                folders: vec![
+                    pb::SelectedFolder {
+                        path: String::new(),
+                        relative_path: None,
+                        ..Default::default()
+                    },
+                    pb::SelectedFolder {
+                        path: "/repo/docs".into(),
+                        relative_path: None,
+                        ..Default::default()
+                    },
+                    pb::SelectedFolder {
+                        path: "/repo/docs".into(),
+                        relative_path: Some("docs/".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            Some(pb::invocation_context::IdeState {
+                visible_files: vec![ide_file("", None)],
+                ..Default::default()
+            }),
+        );
+
+        let files = turn_files(&context(&["/repo"]), &user);
+        assert_eq!(files.relative, ["src/a.rs", "docs/"]);
+    }
+
+    #[test]
+    fn turn_files_match_malformed_globs_to_nothing() {
+        let user = user(
+            pb::SelectedContext {
+                files: vec![pb::SelectedFile {
+                    path: "/repo/src/main.rs".into(),
+                    relative_path: Some("src/main.rs".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            None,
+        );
+        let files = turn_files(&context(&["/repo"]), &user);
+        assert!(!files.matches(&["src/[unclosed".into()]));
+        assert!(!files.matches(&["{unclosed".into()]));
+        assert!(files.matches(&["src/[unclosed".into(), "src/**/*.rs".into()]));
+    }
+
+    #[test]
+    fn ide_state_requires_an_ide_payload() {
+        let user = pb::UserMessage {
+            text: "question".into(),
+            message_id: "message".into(),
+            selected_context: Some(pb::SelectedContext {
+                invocation_context: Some(pb::InvocationContext {
+                    data: Some(pb::invocation_context::Data::BlobId(vec![1, 2, 3])),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(ide_state(&user).is_none());
+        assert!(turn_files(&context(&["/repo"]), &user).is_empty());
+    }
+
+    #[test]
+    fn attached_context_projects_skill_backed_rules_once() {
+        let mut context = context(&["/repo"]);
+        context.rules = vec![pb::CursorRule {
+            full_path: "/repo/.agents/skills/tdd/SKILL.md".into(),
+            content: "SKILL BODY".into(),
+            r#type: Some(pb::CursorRuleType {
+                r#type: Some(pb::cursor_rule_type::Type::FileGlobbed(
+                    pb::CursorRuleTypeFileGlobs {
+                        globs: vec!["src/**/*.rs".into()],
+                    },
+                )),
+            }),
+            ..Default::default()
+        }];
+        context.agent_skills = vec![skill(
+            "/repo/.agents/skills/tdd/SKILL.md",
+            "tdd skill",
+            "SKILL BODY",
+            &["src/**/*.rs"],
+        )];
+
+        let attached =
+            attached_context(&context, &TurnFiles::from_relative(&["src/main.rs"])).unwrap();
+        assert!(attached.contains("tdd skill"), "{attached}");
+        assert!(
+            !attached.contains("<user_rule>"),
+            "the skill entry is the single projection: {attached}"
+        );
+    }
+
+    #[test]
+    fn turn_files_without_selected_context_is_empty() {
+        let user = pb::UserMessage {
+            text: "question".into(),
+            message_id: "message".into(),
+            ..Default::default()
+        };
+        assert!(turn_files(&context(&["/repo"]), &user).is_empty());
+        assert!(turn_files(&pb::RequestContext::default(), &user).is_empty());
     }
 }

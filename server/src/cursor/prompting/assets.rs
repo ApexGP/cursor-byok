@@ -179,3 +179,66 @@ pub(super) fn runtime_expression() -> &'static regex::Regex {
         regex::Regex::new(r"\{\{([A-Z_]+)\}\}").expect("valid runtime placeholder expression")
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_expression_matches_double_brace_uppercase_placeholders() {
+        let expression = runtime_expression();
+        let names = expression
+            .captures_iter("{{OPEN_FILES}}{{TIMESTAMP}}")
+            .map(|capture| capture[1].to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["OPEN_FILES", "TIMESTAMP"]);
+
+        for text in [
+            "{TIMESTAMP}",
+            "{{timestamp}}",
+            "{{A_B1}}",
+            "{{}}",
+            "{{ A }}",
+        ] {
+            assert_eq!(expression.captures_iter(text).count(), 0, "{text}");
+        }
+    }
+
+    #[test]
+    fn runtime_template_validation_accepts_every_known_variable() {
+        assert!(validate_runtime_template(
+            Mode::Agent,
+            "{{OPEN_FILES}}{{SELECTED_CONTEXT}}{{ATTACHED_RULES}}{{ACTION_CONTEXT}}{{TIMESTAMP}}{{USER_QUERY}}{{DEBUG_SERVER_ENDPOINT}}{{DEBUG_LOG_PATH}}{{DEBUG_SESSION_ID}}",
+        )
+        .is_ok());
+        assert!(
+            validate_runtime_template(Mode::Ask, "{{TIMESTAMP}}{{USER_QUERY}}{{TIMESTAMP}}",)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn runtime_template_validation_rejects_malformed_templates() {
+        for (template, reason) in [
+            ("{{TIMESTAMP}}{{USER_QUERY}}{{UNKNOWN}}", "unknown variable"),
+            ("{{USER_QUERY}}", "missing timestamp"),
+            ("{{TIMESTAMP}}", "missing user query"),
+            (
+                "{{TIMESTAMP}}{{USER_QUERY}}{{UNCLOSED",
+                "unclosed placeholder",
+            ),
+            (
+                "{{TIMESTAMP}}{{USER_QUERY}}{{timestamp}}",
+                "lowercase placeholder",
+            ),
+            ("{{TIMESTAMP}}{{USER_QUERY}}{{}}", "empty placeholder"),
+            ("{{TIMESTAMP}}{{USER_QUERY}}}}", "stray closing braces"),
+            ("{{TIMESTAMP}}{{USER_QUERY}}{{,}}", "malformed placeholder"),
+        ] {
+            assert!(
+                validate_runtime_template(Mode::Agent, template).is_err(),
+                "{reason}: {template}"
+            );
+        }
+    }
+}

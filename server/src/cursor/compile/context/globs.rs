@@ -136,6 +136,78 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn normalize_globs_keeps_unbalanced_brace_groups_whole() {
+        assert_eq!(
+            normalize_globs(&globs(&["src/**/*.{ts,tsx"])),
+            globs(&["src/**/*.{ts,tsx"]),
+            "an unclosed brace keeps its comma inside the pattern"
+        );
+        assert_eq!(
+            normalize_globs(&globs(&["a,b}"])),
+            globs(&["a", "b}"]),
+            "a stray closing brace does not open a group"
+        );
+        assert_eq!(normalize_globs(&globs(&["{}"])), globs(&["{}"]));
+        assert_eq!(normalize_globs(&globs(&["{,}"])), globs(&["{,}"]));
+        assert_eq!(
+            normalize_globs(&globs(&["{{a,b},c},d"])),
+            globs(&["{{a,b},c}", "d"])
+        );
+        assert_eq!(
+            normalize_globs(&globs(&["{unclosed"])),
+            globs(&["{unclosed"]),
+            "a lone opening brace keeps the whole value"
+        );
+    }
+
+    #[test]
+    fn normalize_globs_drops_empty_entries() {
+        for input in [
+            Vec::new(),
+            globs(&[""]),
+            globs(&["   "]),
+            globs(&[",,,"]),
+            globs(&[" , \t, "]),
+            globs(&["", " , "]),
+        ] {
+            assert!(normalize_globs(&input).is_empty(), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn normalize_globs_is_idempotent() {
+        let once = normalize_globs(&globs(&["**/*.{ts,tsx}, src/*.rs", " docs/** "]));
+        assert_eq!(normalize_globs(&once), once);
+    }
+
+    #[test]
+    fn double_star_matches_every_path() {
+        assert!(matches(&globs(&["**"]), &paths(&["a/b/c.rs"])));
+        assert!(matches(&globs(&["**"]), &paths(&["src"])));
+        assert!(matches(&globs(&["**"]), &paths(&["src/"])));
+    }
+
+    #[test]
+    fn glob_matching_tolerates_malformed_inputs() {
+        let files = paths(&["src/main.rs"]);
+        for patterns in [
+            globs(&[""]),
+            globs(&["   "]),
+            globs(&["{unclosed"]),
+            globs(&["src/[unclosed"]),
+            globs(&["],["]),
+            vec!["src/**/*.rs\0".to_string()],
+        ] {
+            assert!(!matches(&patterns, &files), "{patterns:?}");
+            assert!(!matches(&patterns, &paths(&[])), "{patterns:?}");
+        }
+        assert!(matches(
+            &globs(&["{unclosed", "src/[unclosed", "src/**/*.rs"]),
+            &files
+        ));
+    }
+
     #[cfg(windows)]
     #[test]
     fn glob_matching_ignores_case_on_windows() {

@@ -244,6 +244,26 @@ mod tests {
             rule_kind(&frontmatter_rule("body", "---\nalwaysApply: false\n---")),
             RuleKind::Manual
         );
+        assert_eq!(
+            rule_kind(&frontmatter_rule(
+                "body",
+                "alwaysApply: false\nglobs: docs/**",
+            )),
+            RuleKind::Globbed {
+                globs: vec!["docs/**".into()],
+            },
+            "a bare YAML block without delimiters is accepted"
+        );
+        assert_eq!(
+            rule_kind(&frontmatter_rule(
+                "body",
+                "---\nalwaysApply: false\nglobs: src/**\n---\ntrailing text",
+            )),
+            RuleKind::Globbed {
+                globs: vec!["src/**".into()],
+            },
+            "content after the closing delimiter is ignored"
+        );
     }
 
     #[test]
@@ -285,5 +305,89 @@ mod tests {
         let mut required = rule("team rule");
         required.is_required = Some(true);
         assert_eq!(rule_kind(&required), RuleKind::Always);
+    }
+
+    #[test]
+    fn rule_kind_tolerates_malformed_frontmatter() {
+        for frontmatter in [
+            "---\nalwaysApply: maybe\n---",
+            "---\nalwaysApply: 1\n---",
+            "---\nglobs: 42\n---",
+            "---\nglobs: [1, 2]\n---",
+            "---\ndescription: [a, b]\n---",
+            "---\nglobs: {a: b}\n---",
+            "---\ndescription: {nested: value}\n---",
+            "---",
+            "---\nglobs: [unclosed\n---",
+            "not: yaml: at: all",
+            "",
+        ] {
+            assert_eq!(
+                rule_kind(&frontmatter_rule("body", frontmatter)),
+                RuleKind::Always,
+                "malformed frontmatter must fall back to always: {frontmatter:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rule_kind_treats_empty_frontmatter_fields_as_unset() {
+        for frontmatter in [
+            "---\nalwaysApply: false\nglobs: []\n---",
+            "---\nalwaysApply: false\nglobs: ''\n---",
+            "---\nalwaysApply: false\nglobs: '   '\n---",
+            "---\nalwaysApply: false\ndescription: '   '\n---",
+        ] {
+            assert_eq!(
+                rule_kind(&frontmatter_rule("body", frontmatter)),
+                RuleKind::Manual,
+                "empty fields do not turn into matches: {frontmatter:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rule_kind_reads_crlf_frontmatter() {
+        assert_eq!(
+            rule_kind(&frontmatter_rule(
+                "body",
+                "---\r\nalwaysApply: false\r\nglobs: src/**/*.tsx\r\n---\r\n",
+            )),
+            RuleKind::Globbed {
+                globs: vec!["src/**/*.tsx".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn rule_kind_normalizes_malformed_protocol_globs() {
+        assert_eq!(
+            rule_kind(&typed_rule(
+                "body",
+                pb::cursor_rule_type::Type::FileGlobbed(pb::CursorRuleTypeFileGlobs {
+                    globs: vec![String::new(), "   ".into(), ",".into()],
+                }),
+            )),
+            RuleKind::Always,
+            "a globbed rule with no usable pattern must not disappear"
+        );
+        assert_eq!(
+            rule_kind(&typed_rule(
+                "body",
+                pb::cursor_rule_type::Type::FileGlobbed(pb::CursorRuleTypeFileGlobs {
+                    globs: vec![" src/**/*.rs , ".into()],
+                }),
+            )),
+            RuleKind::Globbed {
+                globs: vec!["src/**/*.rs".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn required_rules_win_over_malformed_metadata() {
+        let mut rule = frontmatter_rule("body", "---\nglobs: [unclosed\n---");
+        rule.is_required = Some(true);
+        assert_eq!(rule_kind(&rule), RuleKind::Always);
     }
 }
