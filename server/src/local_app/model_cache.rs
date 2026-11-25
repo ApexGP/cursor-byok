@@ -14,7 +14,9 @@ use std::{
     time::Duration,
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use sqlx::{sqlite::SqliteConnectOptions, Connection, Row, SqliteConnection};
 
 use crate::{
@@ -34,6 +36,8 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const AGENT_HOST_GATE: &str = "cursor_agent_host";
 const AGENT_WEBSOCKET_GATE: &str = "nal_websocket_client";
 const AGENT_RETRIES_GATE: &str = "nal_agent_retries";
+const META_MCP_TOOL_GATE: &str = "meta_mcp_tool";
+const MCP_META_SLIM_GATE: &str = "mcp_meta_tool_slim_descriptors";
 
 /// Serializes the read-modify-write of Cursor's single applicationUser JSON.
 /// Concurrent model CRUD would otherwise race on stale model snapshots and
@@ -179,8 +183,9 @@ pub(crate) async fn sync_at_with_service(
 }
 
 /// Cursor loads `workbench.experiments.statsigBootstrap` before the local
-/// `BootstrapStatsig` response is applied, so the agent-host gate must also be
-/// disabled in this persisted cache. The cache is otherwise server-driven.
+/// `BootstrapStatsig` response is applied, so the agent-host, WebSocket, and
+/// MCP meta gates must also be patched in this persisted cache. The cache is
+/// otherwise server-driven.
 async fn patch_statsig_bootstrap(path: &Path) -> Result<()> {
     let options = SqliteConnectOptions::new()
         .filename(path)
@@ -197,9 +202,11 @@ async fn patch_statsig_bootstrap(path: &Path) -> Result<()> {
     let text: String = row.try_get("value")?;
     let mut root: Value = serde_json::from_str(&text)
         .map_err(|error| Error::Config(format!("parse Cursor Statsig cache: {error}")))?;
-    let host_key = djb2(AGENT_HOST_GATE);
-    let websocket_key = djb2(AGENT_WEBSOCKET_GATE);
-    let retries_key = djb2(AGENT_RETRIES_GATE);
+    let host_key = statsig_key(&root, AGENT_HOST_GATE);
+    let websocket_key = statsig_key(&root, AGENT_WEBSOCKET_GATE);
+    let retries_key = statsig_key(&root, AGENT_RETRIES_GATE);
+    let meta_mcp_key = statsig_key(&root, META_MCP_TOOL_GATE);
+    let meta_slim_key = statsig_key(&root, MCP_META_SLIM_GATE);
     let gates = root
         .get_mut("feature_gates")
         .and_then(Value::as_object_mut)
@@ -207,6 +214,8 @@ async fn patch_statsig_bootstrap(path: &Path) -> Result<()> {
     set_gate(gates, &host_key, false);
     set_gate(gates, &websocket_key, false);
     set_gate(gates, &retries_key, true);
+    set_gate(gates, &meta_mcp_key, true);
+    set_gate(gates, &meta_slim_key, true);
     if let Some(object) = root.as_object_mut() {
         object.insert("has_updates".into(), Value::Bool(true));
         object.insert(
@@ -224,7 +233,9 @@ async fn patch_statsig_bootstrap(path: &Path) -> Result<()> {
         agent_host_key = %host_key,
         agent_websocket_key = %websocket_key,
         retries_key = %retries_key,
-        "disabled cursor_agent_host and nal_websocket_client in Cursor Statsig cache"
+        meta_mcp_key = %meta_mcp_key,
+        meta_slim_key = %meta_slim_key,
+        "patched Cursor Statsig cache (agent host + websocket disabled, MCP meta enabled)"
     );
     Ok(())
 }
@@ -291,6 +302,14 @@ fn set_gate(gates: &mut Map<String, Value>, key: &str, value: bool) {
         object
             .entry("secondaryExposures")
             .or_insert_with(|| Value::Array(Vec::new()));
+    }
+}
+
+fn statsig_key(root: &Value, name: &str) -> String {
+    match root.get("hash_used").and_then(Value::as_str) {
+        Some("djb2") => djb2(name),
+        Some("sha256") => STANDARD.encode(Sha256::digest(name.as_bytes())),
+        _ => name.to_owned(),
     }
 }
 
@@ -568,6 +587,22 @@ mod tests {
         assert!(!path.with_extension(BACKUP_EXTENSION).exists());
     }
 
+    #[test]
+    fn statsig_cache_keys_follow_the_hash_mode() {
+        assert_eq!(
+            statsig_key(&json!({ "hash_used": "none" }), AGENT_HOST_GATE),
+            AGENT_HOST_GATE
+        );
+        assert_eq!(
+            statsig_key(&json!({ "hash_used": "djb2" }), AGENT_HOST_GATE),
+            djb2(AGENT_HOST_GATE)
+        );
+        assert_eq!(
+            statsig_key(&json!({ "hash_used": "sha256" }), AGENT_HOST_GATE),
+            STANDARD.encode(Sha256::digest(AGENT_HOST_GATE.as_bytes()))
+        );
+    }
+
     #[tokio::test]
     async fn disables_agent_host_in_persisted_statsig_cache() {
         let directory = tempfile::tempdir().unwrap();
@@ -583,7 +618,10 @@ mod tests {
         let host_key = djb2(AGENT_HOST_GATE);
         let websocket_key = djb2(AGENT_WEBSOCKET_GATE);
         let retries_key = djb2(AGENT_RETRIES_GATE);
+        let meta_mcp_key = djb2(META_MCP_TOOL_GATE);
+        let meta_slim_key = djb2(MCP_META_SLIM_GATE);
         let statsig = json!({
+            "hash_used": "djb2",
             "feature_gates": {
                 host_key.clone(): { "name": host_key, "value": true },
                 websocket_key.clone(): { "name": websocket_key, "value": true },
@@ -618,6 +656,8 @@ mod tests {
         assert_eq!(statsig["feature_gates"][host_key]["value"], false);
         assert_eq!(statsig["feature_gates"][websocket_key]["value"], false);
         assert_eq!(statsig["feature_gates"][retries_key]["value"], true);
+        assert_eq!(statsig["feature_gates"][meta_mcp_key]["value"], true);
+        assert_eq!(statsig["feature_gates"][meta_slim_key]["value"], true);
         assert_eq!(statsig["has_updates"], true);
     }
 

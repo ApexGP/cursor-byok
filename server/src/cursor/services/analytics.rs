@@ -23,6 +23,11 @@ const AGENT_HOST_GATE: &str = "cursor_agent_host";
 /// bypasses the local proxy. Disable it so agent runs use the HTTP transport
 /// (BidiAppend/RunSSE) that the local server implements.
 const AGENT_WEBSOCKET_GATE: &str = "nal_websocket_client";
+/// Inject MCP tools as a compact namespace catalog instead of sending every
+/// tool schema in the model request.
+const META_MCP_TOOL_GATE: &str = "meta_mcp_tool";
+/// Keep only tool names (and server instructions) in the meta descriptors.
+const MCP_META_SLIM_GATE: &str = "mcp_meta_tool_slim_descriptors";
 const LOCAL_RULE: &str = "local_enabled";
 
 #[derive(Clone, PartialEq, Message)]
@@ -117,6 +122,8 @@ fn patch_statsig_gates(config: &mut Value) -> Result<()> {
     let retries_key = statsig_key(config, AGENT_RETRIES_GATE);
     let agent_host_key = statsig_key(config, AGENT_HOST_GATE);
     let agent_websocket_key = statsig_key(config, AGENT_WEBSOCKET_GATE);
+    let meta_mcp_key = statsig_key(config, META_MCP_TOOL_GATE);
+    let meta_slim_key = statsig_key(config, MCP_META_SLIM_GATE);
     let now = chrono::Utc::now().timestamp_millis() as u64;
     let root = config
         .as_object_mut()
@@ -136,12 +143,16 @@ fn patch_statsig_gates(config: &mut Value) -> Result<()> {
         agent_websocket_key.clone(),
         gate(&agent_websocket_key, false),
     );
+    gates.insert(meta_mcp_key.clone(), gate(&meta_mcp_key, true));
+    gates.insert(meta_slim_key.clone(), gate(&meta_slim_key, true));
     tracing::info!(
         hash_used,
         retries_key = %retries_key,
         agent_host_key = %agent_host_key,
         agent_websocket_key = %agent_websocket_key,
-        "patched Cursor Statsig gates (agent host + websocket disabled)"
+        meta_mcp_key = %meta_mcp_key,
+        meta_slim_key = %meta_slim_key,
+        "patched Cursor Statsig gates (agent host + websocket disabled, MCP meta enabled)"
     );
     Ok(())
 }
@@ -225,6 +236,8 @@ mod tests {
             config["feature_gates"][AGENT_WEBSOCKET_GATE]["value"],
             false
         );
+        assert_eq!(config["feature_gates"][META_MCP_TOOL_GATE]["value"], true);
+        assert_eq!(config["feature_gates"][MCP_META_SLIM_GATE]["value"], true);
     }
 
     #[test]
