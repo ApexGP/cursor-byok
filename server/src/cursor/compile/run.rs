@@ -172,6 +172,9 @@ pub(crate) async fn prepare(
             .collect::<Vec<_>>(),
         request.suppress_subagent_progress_update_tool == Some(true),
     )?;
+    if checkpoint_mode != Mode::Compaction && context::meta_tools_enabled(&request_context) {
+        compiler.ensure_mcp_discovery_tool(&mut checkpoint_prompt);
+    }
     if subagents_disabled {
         checkpoint_prompt.tools.retain(|tool| tool.name != "Task");
     }
@@ -343,7 +346,7 @@ pub(crate) async fn prepare(
         subagent_models.clone(),
         subagents_disabled,
         &subagent_model_overrides,
-    );
+    )?;
     Ok((
         PreparedRun {
             run_id,
@@ -602,13 +605,13 @@ fn exec_context(
         crate::model::SubagentKind,
         crate::model::SubagentModelOverride,
     )],
-) -> ExecContext {
+) -> Result<ExecContext> {
     let subagent_model = overrides.first().map(|(_, value)| match value {
         crate::model::SubagentModelOverride::Explicit(model) => SubagentModel::Model(model.clone()),
         crate::model::SubagentModelOverride::Inherit => SubagentModel::Model(model.clone()),
         crate::model::SubagentModelOverride::Disabled => SubagentModel::Disabled,
     });
-    ExecContext {
+    Ok(ExecContext {
         conversation_id: conversation_id.to_string(),
         root_conversation_id: request
             .conversation_group_id
@@ -625,8 +628,8 @@ fn exec_context(
             .map(|env| env.terminals_folder.clone())
             .unwrap_or_default(),
         admin_command_denylist: request_context.admin_command_denylist.clone(),
-        mcp_routes: context::meta_mcp_routes(request_context),
-    }
+        mcp_routes: context::meta_mcp_routes(request_context)?,
+    })
 }
 
 fn apply_subagent_model(model: &mut ModelSpec, selection: &ModelSpec) {

@@ -27,6 +27,28 @@ pub(crate) use turn::{attached_context, ide_state, turn_files};
 /// Tells the model that catalogued agent-decided rules still need a read.
 const AGENT_RULES_INSTRUCTION: &str = "Rules below are not loaded. When a rule description matches the current task, read the file at its fullPath before continuing.";
 
+const DYNAMIC_TOOLS_INSTRUCTION: &str = r#"You have access to tools through dynamic namespaces, e.g. MCP servers, using `GetMcpTools` and `CallMcpTool`.
+
+## Dynamic Tool Discovery and Invocation
+
+Use `GetMcpTools` to discover tool schemas, then `CallMcpTool` to invoke one tool. Aim to minimize round-trips: ideally one discovery call followed by one invocation.
+
+If the user mentions a product or service represented by an available namespace, and the request likely depends on it, proactively inspect that namespace before answering. If you are unsure which namespace matches, search with a relevant pattern.
+
+`GetMcpTools` supports these modes:
+
+1. `{"server":"<id>"}`: returns schemas and full descriptions for every tool in that namespace.
+2. `{"server":"<id>","toolName":"<name>"}`: returns one tool schema with its full description.
+3. `{"pattern":"<regex>"}`: searches namespace names, tool names and tool descriptions. Matching ignores case.
+4. `{"server":"<id>","pattern":"<regex>"}`: searches tool names and descriptions within one namespace. Matching ignores case.
+5. No arguments: returns the full catalog.
+
+Pattern-search and catalog results shorten long descriptions, with "... [truncated]" at each cut; namespace and single-tool lookups always return the complete description.
+
+Always inspect a tool's schema before invoking it with `CallMcpTool`.
+
+If the available dynamic tools do not fully support what the user asked you to do, complete the work you can with the current tool set. In your work summary, include what you were unable to do and why. Do not use browser automation to work around missing tools unless the user explicitly asks you to use the browser."#;
+
 pub async fn hydrate(
     request: &pb::AgentRunRequest,
     context_sync: &RequestContextSynchronizer,
@@ -303,116 +325,119 @@ pub fn compile_context(
             subagents.join("\n")
         ));
     }
-    {
-        let servers = context
-            .mcp_meta_tool_options
-            .as_ref()
-            .into_iter()
-            .flat_map(|options| &options.mcp_descriptors)
-            .filter_map(compile_mcp_descriptor)
+    if let Some(options) = active_meta_tool_options(context) {
+        let namespaces = options
+            .mcp_descriptors
+            .iter()
+            .filter_map(|server| compile_dynamic_namespace(server, context))
             .collect::<Vec<_>>();
-        if !servers.is_empty() {
+        if !namespaces.is_empty() {
             sections.push(format!(
-                "<mcp_meta_tools>\nThe following MCP tools are available. Call a listed tool directly with CallMcpTool without calling GetMcpTools first. If a call returns an error, use it to correct the arguments or authentication and retry when appropriate.\n<mcp_meta_tool_servers>\n{}\n</mcp_meta_tool_servers>\n</mcp_meta_tools>",
-                servers.join("\n")
+                "<dynamic_tools>\n{DYNAMIC_TOOLS_INSTRUCTION}\n\nAvailable dynamic tool namespaces:\n\n<dynamic_tool_namespaces>\n{}\n</dynamic_tool_namespaces>\n\n\nIf an MCP-backed namespace requires authentication, call `mcp_auth` through `CallMcpTool` for that namespace, then inspect it again and retry if appropriate. Do not authenticate namespaces preemptively or repeatedly.\n</dynamic_tools>",
+                namespaces.join("\n")
             ));
         }
     }
     sections.join("\n\n")
 }
 
-fn compile_mcp_descriptor(server: &pb::McpDescriptor) -> Option<String> {
-    if server.server_identifier.trim().is_empty() {
-        return None;
-    }
-    let tools = server
-        .tools
-        .iter()
-        .filter(|tool| !tool.tool_name.trim().is_empty())
-        .map(|tool| {
-            let mut lines = vec![format!("<mcp_tool name=\"{}\">", xml(&tool.tool_name))];
-            if let Some(path) = tool
-                .definition_path
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-            {
-                lines.push(format!("<definition_path>{}</definition_path>", xml(path)));
-            }
-            if let Some(description) = tool
-                .description
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-            {
-                lines.push(format!("<description>{}</description>", xml(description)));
-            }
-            if let Some(schema) = mcp_input_schema(tool) {
-                lines.push(format!("<input_schema>{}</input_schema>", xml(&schema)));
-            }
-            lines.push("</mcp_tool>".into());
-            lines.join("\n")
-        })
-        .collect::<Vec<_>>();
-    if tools.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "<mcp_meta_tool_server name=\"{}\" identifier=\"{}\">\n<tools>\n{}\n</tools>\n</mcp_meta_tool_server>",
-        xml(if server.server_name.trim().is_empty() {
-            &server.server_identifier
-        } else {
-            &server.server_name
-        }),
-        xml(&server.server_identifier),
-        tools.join("\n"),
-    ))
-}
-
-fn mcp_input_schema(tool: &pb::McpToolDescriptor) -> Option<String> {
-    tool.input_schema_json
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| {
-            serde_json::from_str::<Value>(value)
-                .map(|value| value.to_string())
-                .unwrap_or_else(|_| value.to_string())
-        })
-        .or_else(|| {
-            tool.input_schema
-                .as_ref()
-                .map(prost_value)
-                .map(|value| value.to_string())
-        })
-}
-
-pub fn meta_mcp_routes(context: &pb::RequestContext) -> HashMap<(String, String), McpRoute> {
+fn active_meta_tool_options(context: &pb::RequestContext) -> Option<&pb::McpMetaToolOptions> {
     context
         .mcp_meta_tool_options
         .as_ref()
-        .into_iter()
-        .flat_map(|options| &options.mcp_descriptors)
-        .filter(|server| !server.server_identifier.trim().is_empty())
-        .flat_map(|server| {
-            server.tools.iter().filter_map(move |tool| {
-                if tool.tool_name.trim().is_empty() {
-                    return None;
-                }
-                let provider_identifier = if server.server_name.trim().is_empty() {
-                    server.server_identifier.clone()
-                } else {
-                    server.server_name.clone()
-                };
-                Some((
-                    (server.server_identifier.clone(), tool.tool_name.clone()),
-                    McpRoute {
-                        name: format!("{}-{}", server.server_identifier, tool.tool_name),
-                        provider_identifier,
-                        tool_name: tool.tool_name.clone(),
-                        description: tool.description.clone().unwrap_or_default(),
-                    },
-                ))
-            })
+        .filter(|options| options.enabled)
+}
+
+pub fn meta_tools_enabled(context: &pb::RequestContext) -> bool {
+    active_meta_tool_options(context).is_some()
+}
+
+fn compile_dynamic_namespace(
+    server: &pb::McpDescriptor,
+    context: &pb::RequestContext,
+) -> Option<String> {
+    let identifier = server.server_identifier.trim();
+    if identifier.is_empty() {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let tools = server
+        .tools
+        .iter()
+        .filter_map(|tool| {
+            let name = tool.tool_name.trim();
+            (!name.is_empty() && seen.insert(name)).then(|| xml(name))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let instructions = server
+        .server_use_instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            context
+                .mcp_instructions
+                .iter()
+                .find(|entry| entry.server_identifier.trim() == identifier)
+                .map(|entry| entry.instructions.trim())
+                .filter(|value| !value.is_empty())
+        });
+    if tools.is_empty() && instructions.is_none() {
+        return None;
+    }
+    let mut output = format!(
+        "<namespace name=\"{}\" tools=\"{}\"",
+        xml(identifier),
+        tools.join(", ")
+    );
+    if let Some(instructions) = instructions {
+        output.push_str(&format!(
+            " namespaceUseInstructions=\"{}\"",
+            xml(instructions)
+        ));
+    }
+    output.push_str(" source=\"mcp\" />");
+    Some(output)
+}
+
+pub fn meta_mcp_routes(
+    context: &pb::RequestContext,
+) -> Result<HashMap<(String, String), McpRoute>> {
+    let Some(options) = active_meta_tool_options(context) else {
+        return Ok(HashMap::new());
+    };
+    let mut routes = HashMap::new();
+    for server in &options.mcp_descriptors {
+        let identifier = server.server_identifier.trim();
+        if identifier.is_empty() {
+            continue;
+        }
+        let provider_identifier = if server.server_name.trim().is_empty() {
+            identifier.to_string()
+        } else {
+            server.server_name.trim().to_string()
+        };
+        for tool in &server.tools {
+            let tool_name = tool.tool_name.trim();
+            if tool_name.is_empty() {
+                continue;
+            }
+            let key = (identifier.to_string(), tool_name.to_string());
+            let route = McpRoute {
+                name: format!("{identifier}-{tool_name}"),
+                provider_identifier: provider_identifier.clone(),
+                tool_name: tool_name.to_string(),
+                description: tool.description.clone().unwrap_or_default(),
+            };
+            if routes.insert(key.clone(), route).is_some() {
+                return Err(Error::Protocol(format!(
+                    "duplicate MCP tool route: {}/{}",
+                    key.0, key.1
+                )));
+            }
+        }
+    }
+    Ok(routes)
 }
 
 fn xml(value: &str) -> String {
@@ -490,13 +515,23 @@ pub fn dynamic_mcp(
     request: &pb::AgentRunRequest,
     context: &pb::RequestContext,
 ) -> Result<BTreeMap<String, (pb::McpToolDefinition, ToolDefinition)>> {
-    let direct = request
-        .mcp_tools
-        .iter()
-        .flat_map(|tools| tools.mcp_tools.iter());
-    let contextual = context.tools.iter();
+    // In meta mode Cursor has already decided which servers need their full
+    // schemas in the request (for example browser/control servers) and keeps
+    // the rest behind the dynamic catalog. Trust that selection instead of
+    // merging the full request-level list back in.
+    let meta_mode = active_meta_tool_options(context).is_some();
+    let mut wires = Vec::new();
+    if !meta_mode {
+        wires.extend(
+            request
+                .mcp_tools
+                .iter()
+                .flat_map(|tools| tools.mcp_tools.iter()),
+        );
+    }
+    wires.extend(context.tools.iter());
     let mut output = BTreeMap::new();
-    for wire in direct.chain(contextual) {
+    for wire in wires {
         if wire.name.is_empty() {
             return Err(Error::Protocol(
                 "MCP tool definition is missing name".into(),
@@ -596,7 +631,7 @@ mod testing;
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{rule, skill, typed_rule};
+    use super::testing::{mcp_descriptor, mcp_tool, rule, skill, typed_rule};
     use super::*;
 
     #[test]
@@ -929,5 +964,322 @@ mod tests {
         let rules = text.find("<rules>").expect("rules section");
         let skills = text.find("<agent_skills>").expect("skills section");
         assert!(rules < skills, "{text}");
+    }
+
+    #[test]
+    fn compile_context_renders_dynamic_tool_namespaces() {
+        let context = pb::RequestContext {
+            mcp_meta_tool_options: Some(pb::McpMetaToolOptions {
+                enabled: true,
+                mcp_descriptors: vec![
+                    mcp_descriptor(
+                        "user-rea",
+                        "REA",
+                        &["search", "read"],
+                        Some("REA instructions"),
+                    ),
+                    mcp_descriptor("user-eip", "EIP", &["lookup"], None),
+                ],
+            }),
+            mcp_instructions: vec![pb::McpInstructions {
+                server_identifier: "user-eip".into(),
+                instructions: "EIP fallback".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        assert!(text.contains("<dynamic_tools>"), "{text}");
+        assert!(
+            text.contains(
+                "<namespace name=\"user-rea\" tools=\"search, read\" namespaceUseInstructions=\"REA instructions\" source=\"mcp\" />"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "<namespace name=\"user-eip\" tools=\"lookup\" namespaceUseInstructions=\"EIP fallback\" source=\"mcp\" />"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("Use `GetMcpTools` to discover tool schemas"),
+            "{text}"
+        );
+        assert!(text.contains("invoking it with `CallMcpTool`"), "{text}");
+        assert!(!text.contains("<mcp_meta_tool"), "{text}");
+        assert!(!text.contains("<input_schema>"), "{text}");
+    }
+
+    #[test]
+    fn compile_context_renders_dynamic_catalog_for_a_single_tool() {
+        let context = pb::RequestContext {
+            mcp_meta_tool_options: Some(pb::McpMetaToolOptions {
+                enabled: true,
+                mcp_descriptors: vec![mcp_descriptor("solo", "Solo", &["only"], None)],
+            }),
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        assert!(
+            text.contains("<namespace name=\"solo\" tools=\"only\" source=\"mcp\" />"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn compile_context_catalogs_large_namespaces_without_schemas() {
+        let tools = (0..250)
+            .map(|index| format!("tool_{index}"))
+            .collect::<Vec<_>>();
+        let names = tools.iter().map(String::as_str).collect::<Vec<_>>();
+        let context = pb::RequestContext {
+            mcp_meta_tool_options: Some(pb::McpMetaToolOptions {
+                enabled: true,
+                mcp_descriptors: vec![mcp_descriptor("bulk", "Bulk", &names, None)],
+            }),
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        assert_eq!(text.matches("<namespace ").count(), 1, "{text}");
+        assert!(text.contains("tool_0, tool_1,"), "{text}");
+        assert!(text.contains("tool_249"), "{text}");
+        assert!(!text.contains("input_schema"), "{text}");
+    }
+
+    #[test]
+    fn compile_context_skips_malformed_dynamic_namespaces() {
+        let context = pb::RequestContext {
+            mcp_meta_tool_options: Some(pb::McpMetaToolOptions {
+                enabled: true,
+                mcp_descriptors: vec![
+                    mcp_descriptor("", "Missing identifier", &["orphan"], None),
+                    mcp_descriptor("", "Missing identifier", &["orphan"], Some("ignored")),
+                    mcp_descriptor(
+                        "user-rea",
+                        "REA",
+                        &["", "ok", "ok", "a&\"<b>"],
+                        Some("x & y \"z\" <q>"),
+                    ),
+                    mcp_descriptor("user-eip", "EIP", &[], None),
+                    mcp_descriptor("resources", "Resources", &[], Some("resources only")),
+                ],
+            }),
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        assert!(!text.contains("orphan"), "{text}");
+        assert!(
+            text.contains(
+                "<namespace name=\"user-rea\" tools=\"ok, a&amp;&quot;&lt;b&gt;\" namespaceUseInstructions=\"x &amp; y &quot;z&quot; &lt;q&gt;\" source=\"mcp\" />"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "<namespace name=\"resources\" tools=\"\" namespaceUseInstructions=\"resources only\" source=\"mcp\" />"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("name=\"user-eip\""), "{text}");
+    }
+
+    #[test]
+    fn compile_context_omits_disabled_or_empty_dynamic_catalogs() {
+        let disabled = pb::RequestContext {
+            mcp_meta_tool_options: Some(pb::McpMetaToolOptions {
+                enabled: false,
+                mcp_descriptors: vec![mcp_descriptor("server", "Server", &["tool"], None)],
+            }),
+            ..Default::default()
+        };
+        assert!(!compile_context(&disabled, "2026-11-24", None).contains("<dynamic_tools>"));
+
+        let empty = pb::RequestContext {
+            mcp_meta_tool_options: Some(pb::McpMetaToolOptions {
+                enabled: true,
+                mcp_descriptors: vec![],
+            }),
+            ..Default::default()
+        };
+        assert!(!compile_context(&empty, "2026-11-24", None).contains("<dynamic_tools>"));
+    }
+
+    #[test]
+    fn dynamic_mcp_meta_mode_uses_only_client_selected_tools() {
+        let request = pb::AgentRunRequest {
+            mcp_tools: Some(pb::McpTools {
+                mcp_tools: vec![
+                    mcp_tool("user-rea-search", "REA", "search"),
+                    mcp_tool("user-eip-lookup", "EIP", "lookup"),
+                ],
+            }),
+            ..Default::default()
+        };
+        let context = pb::RequestContext {
+            tools: vec![mcp_tool("user-rea-search", "REA", "search")],
+            mcp_meta_tool_options: Some(pb::McpMetaToolOptions {
+                enabled: true,
+                mcp_descriptors: vec![
+                    mcp_descriptor("user-rea", "REA", &["search"], None),
+                    mcp_descriptor("user-eip", "EIP", &["lookup"], None),
+                ],
+            }),
+            ..Default::default()
+        };
+
+        let tools = dynamic_mcp(&request, &context).unwrap();
+        assert_eq!(
+            tools.keys().cloned().collect::<Vec<_>>(),
+            ["user-rea-search"],
+            "meta mode must trust Cursor's request-context tool selection"
+        );
+        assert_eq!(
+            tools["user-rea-search"].1.parameters,
+            serde_json::json!({"type": "object", "properties": {}})
+        );
+    }
+
+    #[test]
+    fn dynamic_mcp_meta_mode_allows_no_direct_tools() {
+        let request = pb::AgentRunRequest {
+            mcp_tools: Some(pb::McpTools {
+                mcp_tools: vec![mcp_tool("user-rea-search", "REA", "search")],
+            }),
+            ..Default::default()
+        };
+        let context = pb::RequestContext {
+            mcp_meta_tool_options: Some(pb::McpMetaToolOptions {
+                enabled: true,
+                mcp_descriptors: vec![mcp_descriptor("user-rea", "REA", &["search"], None)],
+            }),
+            ..Default::default()
+        };
+
+        assert!(dynamic_mcp(&request, &context).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dynamic_mcp_full_mode_merges_request_and_context_tools() {
+        let request = pb::AgentRunRequest {
+            mcp_tools: Some(pb::McpTools {
+                mcp_tools: vec![mcp_tool("request-tool", "Request", "tool")],
+            }),
+            ..Default::default()
+        };
+        let context = pb::RequestContext {
+            tools: vec![mcp_tool("context-tool", "Context", "tool")],
+            ..Default::default()
+        };
+
+        let tools = dynamic_mcp(&request, &context).unwrap();
+        assert_eq!(
+            tools.keys().cloned().collect::<Vec<_>>(),
+            ["context-tool", "request-tool"]
+        );
+    }
+
+    #[test]
+    fn dynamic_mcp_rejects_malformed_tool_data() {
+        let request = pb::AgentRunRequest {
+            mcp_tools: Some(pb::McpTools {
+                mcp_tools: vec![mcp_tool("", "Server", "tool")],
+            }),
+            ..Default::default()
+        };
+        assert!(dynamic_mcp(&request, &pb::RequestContext::default())
+            .unwrap_err()
+            .to_string()
+            .contains("missing name"));
+
+        let request = pb::AgentRunRequest {
+            mcp_tools: Some(pb::McpTools {
+                mcp_tools: vec![pb::McpToolDefinition {
+                    name: "bad-schema".into(),
+                    input_schema_json: Some("[]".into()),
+                    ..Default::default()
+                }],
+            }),
+            ..Default::default()
+        };
+        assert!(dynamic_mcp(&request, &pb::RequestContext::default())
+            .unwrap_err()
+            .to_string()
+            .contains("must describe an object"));
+
+        let request = pb::AgentRunRequest {
+            mcp_tools: Some(pb::McpTools {
+                mcp_tools: vec![
+                    mcp_tool("same name", "First", "tool"),
+                    mcp_tool("same_name", "Second", "tool"),
+                ],
+            }),
+            ..Default::default()
+        };
+        assert!(dynamic_mcp(&request, &pb::RequestContext::default())
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate MCP tool name"));
+    }
+
+    #[test]
+    fn meta_mcp_routes_skip_blank_descriptors() {
+        let context = pb::RequestContext {
+            mcp_meta_tool_options: Some(pb::McpMetaToolOptions {
+                enabled: true,
+                mcp_descriptors: vec![
+                    mcp_descriptor("", "No identifier", &["a"], None),
+                    mcp_descriptor(" server ", " Server ", &["", " ok "], Some("instructions")),
+                ],
+            }),
+            ..Default::default()
+        };
+
+        let routes = meta_mcp_routes(&context).unwrap();
+        assert_eq!(
+            routes.keys().cloned().collect::<Vec<_>>(),
+            [("server".to_string(), "ok".to_string())]
+        );
+        let route = &routes[&("server".to_string(), "ok".to_string())];
+        assert_eq!(route.name, "server-ok");
+        assert_eq!(route.provider_identifier, "Server");
+        assert_eq!(route.tool_name, "ok");
+        assert!(route.description.is_empty());
+    }
+
+    #[test]
+    fn meta_mcp_routes_reject_duplicate_tools() {
+        let context = pb::RequestContext {
+            mcp_meta_tool_options: Some(pb::McpMetaToolOptions {
+                enabled: true,
+                mcp_descriptors: vec![
+                    mcp_descriptor("server", "Server", &["run"], None),
+                    mcp_descriptor(" server ", "Server", &[" run "], None),
+                ],
+            }),
+            ..Default::default()
+        };
+
+        assert!(meta_mcp_routes(&context)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate MCP tool route: server/run"));
+    }
+
+    #[test]
+    fn meta_mcp_routes_require_meta_mode() {
+        let context = pb::RequestContext {
+            mcp_meta_tool_options: Some(pb::McpMetaToolOptions {
+                enabled: false,
+                mcp_descriptors: vec![mcp_descriptor("server", "Server", &["run"], None)],
+            }),
+            ..Default::default()
+        };
+
+        assert!(meta_mcp_routes(&context).unwrap().is_empty());
     }
 }

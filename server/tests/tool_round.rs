@@ -1399,6 +1399,482 @@ async fn duplicate_tool_call_id_across_rounds_does_not_wedge_the_run() {
     assert_eq!(provider.requests().len(), 3);
 }
 
+fn mcp_descriptor(identifier: &str, tool: &str) -> pb::McpDescriptor {
+    pb::McpDescriptor {
+        server_identifier: identifier.into(),
+        server_name: "Fixture".into(),
+        tools: vec![pb::McpToolDescriptor {
+            tool_name: tool.into(),
+            description: Some("fixture tool".into()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn mcp_meta_context(descriptors: Vec<pb::McpDescriptor>) -> pb::RequestContext {
+    pb::RequestContext {
+        mcp_meta_tool_options: Some(pb::McpMetaToolOptions {
+            enabled: true,
+            mcp_descriptors: descriptors,
+        }),
+        ..Default::default()
+    }
+}
+
+fn client_run_with_context(context: pb::RequestContext) -> pb::AgentClientMessage {
+    let mut message = client_run();
+    let Some(pb::agent_client_message::Message::RunRequest(request)) = message.message.as_mut()
+    else {
+        unreachable!("client_run builds a RunRequest");
+    };
+    let Some(pb::conversation_action::Action::UserMessageAction(action)) = request
+        .action
+        .as_mut()
+        .and_then(|action| action.action.as_mut())
+    else {
+        unreachable!("client_run builds a UserMessageAction");
+    };
+    action.request_context = Some(context);
+    message
+}
+
+fn mcp_tool_call_arguments(
+    server: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> Vec<ModelEvent> {
+    vec![
+        ModelEvent::Start {
+            model_call_id: "ignored".into(),
+        },
+        ModelEvent::ToolCallStart {
+            index: 0,
+            call_id: "call-mcp".into(),
+            name: "CallMcpTool".into(),
+        },
+        ModelEvent::ToolCallArgumentsDelta {
+            index: 0,
+            delta: json!({
+                "server": server,
+                "toolName": tool,
+                "arguments": arguments
+            })
+            .to_string(),
+        },
+        ModelEvent::ToolCallEnd { index: 0 },
+        ModelEvent::Done(FinishReason::ToolUse),
+    ]
+}
+
+fn text_round() -> Vec<ModelEvent> {
+    vec![
+        ModelEvent::Start {
+            model_call_id: "ignored".into(),
+        },
+        ModelEvent::TextStart,
+        ModelEvent::TextDelta("done".into()),
+        ModelEvent::TextEnd,
+        ModelEvent::Done(FinishReason::Stop),
+    ]
+}
+
+#[tokio::test]
+async fn mcp_meta_descriptors_route_a_call_through_the_transport() {
+    let (_directory, store) = fixtures::temp_store().await;
+    let provider = fake_provider::FakeProvider::default();
+    provider.push(mcp_tool_call_arguments(
+        "fixture",
+        "run",
+        json!({"value": 1}),
+    ));
+    provider.push(text_round());
+
+    let assets = PromptAssets::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("prompt/cursor")
+            .as_path(),
+    )
+    .unwrap();
+    let registry = TransportRegistry::new(
+        store.clone(),
+        Arc::new(provider.clone()),
+        PromptCompiler::new(assets),
+    );
+    let handle = registry.get_or_create("mcp-transport").await.unwrap();
+    let mut output = handle.subscribe();
+    handle
+        .command(TransportCommand::Append {
+            seqno: 0,
+            message: Box::new(client_run_with_context(mcp_meta_context(vec![
+                mcp_descriptor("fixture", "run"),
+            ]))),
+        })
+        .await
+        .unwrap();
+
+    let mut seqno = 1;
+    let mut saw_args = false;
+    let mut saw_completion = false;
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (flags, payload) = connect::decode_frames(&frame).unwrap().pop().unwrap();
+        if flags & connect::END_STREAM_FLAG != 0 {
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+                json!({})
+            );
+            break;
+        }
+        let server = pb::AgentServerMessage::decode(payload).unwrap();
+        match server.message {
+            Some(pb::agent_server_message::Message::KvServerMessage(kv)) => {
+                handle
+                    .command(TransportCommand::Append {
+                        seqno,
+                        message: Box::new(kv_ack(kv.id)),
+                    })
+                    .await
+                    .unwrap();
+                seqno += 1;
+            }
+            Some(pb::agent_server_message::Message::ExecServerMessage(exec)) => {
+                let Some(pb::exec_server_message::Message::McpArgs(args)) = exec.message else {
+                    panic!("expected MCP args")
+                };
+                assert_eq!(args.name, "fixture-run");
+                assert_eq!(args.provider_identifier, "Fixture");
+                assert_eq!(args.server_identifier, "fixture");
+                assert_eq!(args.tool_name, "run");
+                saw_args = true;
+                handle
+                    .command(TransportCommand::Append {
+                        seqno,
+                        message: Box::new(pb::AgentClientMessage {
+                            message: Some(pb::agent_client_message::Message::ExecClientMessage(
+                                pb::ExecClientMessage {
+                                    id: exec.id,
+                                    message: Some(pb::exec_client_message::Message::McpResult(
+                                        pb::McpResult {
+                                            result: Some(pb::mcp_result::Result::Success(
+                                                pb::McpSuccess {
+                                                    content: vec![pb::McpToolResultContentItem {
+                                                        content: Some(
+                                                            pb::mcp_tool_result_content_item::Content::Text(
+                                                                pb::McpTextContent {
+                                                                    text: "ok".into(),
+                                                                    ..Default::default()
+                                                                },
+                                                            ),
+                                                        ),
+                                                    }],
+                                                    is_error: false,
+                                                    structured_content: None,
+                                                },
+                                            )),
+                                        },
+                                    )),
+                                    ..Default::default()
+                                },
+                            )),
+                        }),
+                    })
+                    .await
+                    .unwrap();
+                seqno += 1;
+                handle
+                    .command(TransportCommand::Append {
+                        seqno,
+                        message: Box::new(pb::AgentClientMessage {
+                            message: Some(
+                                pb::agent_client_message::Message::ExecClientControlMessage(
+                                    pb::ExecClientControlMessage {
+                                        message: Some(
+                                            pb::exec_client_control_message::Message::StreamClose(
+                                                pb::ExecClientStreamClose { id: exec.id },
+                                            ),
+                                        ),
+                                    },
+                                ),
+                            ),
+                        }),
+                    })
+                    .await
+                    .unwrap();
+                seqno += 1;
+            }
+            Some(pb::agent_server_message::Message::InteractionUpdate(update)) => {
+                if let Some(pb::interaction_update::Message::ToolCallCompleted(completed)) =
+                    update.message
+                {
+                    let Some(pb::tool_call::Tool::McpToolCall(call)) =
+                        completed.tool_call.expect("completed ToolCall").tool
+                    else {
+                        panic!("expected McpToolCall")
+                    };
+                    let result = call.result.expect("MCP result");
+                    assert!(matches!(
+                        result.result,
+                        Some(pb::mcp_tool_result::Result::Success(_))
+                    ));
+                    saw_completion = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_args);
+    assert!(saw_completion);
+    assert_eq!(provider.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn mcp_auth_reaches_the_client_in_a_transport_run() {
+    let (_directory, store) = fixtures::temp_store().await;
+    let provider = fake_provider::FakeProvider::default();
+    provider.push(mcp_tool_call_arguments("fixture", "mcp_auth", json!({})));
+    provider.push(text_round());
+
+    let assets = PromptAssets::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("prompt/cursor")
+            .as_path(),
+    )
+    .unwrap();
+    let registry = TransportRegistry::new(
+        store.clone(),
+        Arc::new(provider.clone()),
+        PromptCompiler::new(assets),
+    );
+    let handle = registry.get_or_create("mcp-auth").await.unwrap();
+    let mut output = handle.subscribe();
+    handle
+        .command(TransportCommand::Append {
+            seqno: 0,
+            message: Box::new(client_run_with_context(mcp_meta_context(vec![
+                mcp_descriptor("fixture", "run"),
+            ]))),
+        })
+        .await
+        .unwrap();
+
+    let mut seqno = 1;
+    let mut saw_auth = false;
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (flags, payload) = connect::decode_frames(&frame).unwrap().pop().unwrap();
+        if flags & connect::END_STREAM_FLAG != 0 {
+            break;
+        }
+        let server = pb::AgentServerMessage::decode(payload).unwrap();
+        match server.message {
+            Some(pb::agent_server_message::Message::KvServerMessage(kv)) => {
+                handle
+                    .command(TransportCommand::Append {
+                        seqno,
+                        message: Box::new(kv_ack(kv.id)),
+                    })
+                    .await
+                    .unwrap();
+                seqno += 1;
+            }
+            Some(pb::agent_server_message::Message::InteractionQuery(query)) => {
+                let Some(pb::interaction_query::Query::McpAuthRequestQuery(auth)) =
+                    query.query.as_ref()
+                else {
+                    panic!("expected MCP auth query")
+                };
+                assert_eq!(auth.args.as_ref().unwrap().server_identifier, "fixture");
+                saw_auth = true;
+                handle
+                    .command(TransportCommand::Append {
+                        seqno,
+                        message: Box::new(pb::AgentClientMessage {
+                            message: Some(pb::agent_client_message::Message::InteractionResponse(
+                                pb::InteractionResponse {
+                                    id: query.id,
+                                    result: Some(
+                                        pb::interaction_response::Result::McpAuthRequestResponse(
+                                            pb::McpAuthRequestResponse {
+                                                result: Some(
+                                                    pb::mcp_auth_request_response::Result::Approved(
+                                                        pb::mcp_auth_request_response::Approved {},
+                                                    ),
+                                                ),
+                                            },
+                                        ),
+                                    ),
+                                },
+                            )),
+                        }),
+                    })
+                    .await
+                    .unwrap();
+                seqno += 1;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_auth);
+    assert_eq!(provider.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn duplicate_mcp_descriptors_fail_the_run_before_the_model_call() {
+    let (_directory, store) = fixtures::temp_store().await;
+    let provider = fake_provider::FakeProvider::default();
+    let assets = PromptAssets::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("prompt/cursor")
+            .as_path(),
+    )
+    .unwrap();
+    let registry = TransportRegistry::new(
+        store.clone(),
+        Arc::new(provider.clone()),
+        PromptCompiler::new(assets),
+    );
+    let handle = registry.get_or_create("mcp-duplicate").await.unwrap();
+    let mut output = handle.subscribe();
+    handle
+        .command(TransportCommand::Append {
+            seqno: 0,
+            message: Box::new(client_run_with_context(mcp_meta_context(vec![
+                mcp_descriptor("fixture", "run"),
+                mcp_descriptor("fixture", "run"),
+            ]))),
+        })
+        .await
+        .unwrap();
+
+    let mut seqno = 1;
+    let error = loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (flags, payload) = connect::decode_frames(&frame).unwrap().pop().unwrap();
+        if flags & connect::END_STREAM_FLAG != 0 {
+            break String::from_utf8(payload.to_vec()).unwrap();
+        }
+        let server = pb::AgentServerMessage::decode(payload).unwrap();
+        if let Some(pb::agent_server_message::Message::KvServerMessage(kv)) = server.message {
+            handle
+                .command(TransportCommand::Append {
+                    seqno,
+                    message: Box::new(kv_ack(kv.id)),
+                })
+                .await
+                .unwrap();
+            seqno += 1;
+        }
+    };
+
+    assert!(error.contains("duplicate MCP tool route"), "{error}");
+    assert_eq!(provider.requests().len(), 0);
+}
+
+#[tokio::test]
+async fn malformed_mcp_arguments_become_tool_errors_in_a_transport_run() {
+    let (_directory, store) = fixtures::temp_store().await;
+    let provider = fake_provider::FakeProvider::default();
+    provider.push(vec![
+        ModelEvent::Start {
+            model_call_id: "ignored".into(),
+        },
+        ModelEvent::ToolCallStart {
+            index: 0,
+            call_id: "call-mcp".into(),
+            name: "CallMcpTool".into(),
+        },
+        ModelEvent::ToolCallArgumentsDelta {
+            index: 0,
+            delta: json!({"server": "fixture", "arguments": {}}).to_string(),
+        },
+        ModelEvent::ToolCallEnd { index: 0 },
+        ModelEvent::Done(FinishReason::ToolUse),
+    ]);
+    provider.push(text_round());
+
+    let assets = PromptAssets::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("prompt/cursor")
+            .as_path(),
+    )
+    .unwrap();
+    let registry = TransportRegistry::new(
+        store.clone(),
+        Arc::new(provider.clone()),
+        PromptCompiler::new(assets),
+    );
+    let handle = registry.get_or_create("mcp-malformed").await.unwrap();
+    let mut output = handle.subscribe();
+    handle
+        .command(TransportCommand::Append {
+            seqno: 0,
+            message: Box::new(client_run_with_context(mcp_meta_context(vec![
+                mcp_descriptor("fixture", "run"),
+            ]))),
+        })
+        .await
+        .unwrap();
+
+    let mut seqno = 1;
+    let mut error = None;
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (flags, payload) = connect::decode_frames(&frame).unwrap().pop().unwrap();
+        if flags & connect::END_STREAM_FLAG != 0 {
+            break;
+        }
+        let server = pb::AgentServerMessage::decode(payload).unwrap();
+        match server.message {
+            Some(pb::agent_server_message::Message::KvServerMessage(kv)) => {
+                handle
+                    .command(TransportCommand::Append {
+                        seqno,
+                        message: Box::new(kv_ack(kv.id)),
+                    })
+                    .await
+                    .unwrap();
+                seqno += 1;
+            }
+            Some(pb::agent_server_message::Message::InteractionUpdate(update)) => {
+                if let Some(pb::interaction_update::Message::ToolCallCompleted(completed)) =
+                    update.message
+                {
+                    let Some(pb::tool_call::Tool::McpToolCall(call)) =
+                        completed.tool_call.expect("completed ToolCall").tool
+                    else {
+                        panic!("expected McpToolCall")
+                    };
+                    let result = call.result.expect("MCP result");
+                    let Some(pb::mcp_tool_result::Result::Error(result)) = result.result else {
+                        panic!("expected MCP error result")
+                    };
+                    error = Some(result.error);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let error = error.expect("completed MCP tool error");
+    assert!(error.contains("missing toolName"), "{error}");
+    assert_eq!(provider.requests().len(), 2);
+}
+
 fn client_run() -> pb::AgentClientMessage {
     let user = pb::UserMessage {
         text: "read it".into(),

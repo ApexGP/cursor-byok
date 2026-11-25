@@ -219,9 +219,12 @@ A tool result is truncated once at the `ToolCompletion` boundary so the model
 and the UI see the same content. Interrupted tool calls still write a paired
 interrupted result. Tool argument errors become tool errors, not failed runs.
 
-MCP tools join the catalog dynamically; duplicate names are rejected. Subagents
-are separate runs linked by `parent_run_id` and `parent_tool_call_id`, and a
-subagent cannot nest another Task.
+MCP tools join the catalog dynamically; duplicate names are rejected. When
+`mcp_meta_tool_options` is enabled, the request context carries a
+`<dynamic_tools>` catalog plus the `GetMcpTools` / `CallMcpTool` contract
+instead of full static schemas, and an unauthenticated namespace is retried
+through `mcp_auth`. Subagents are separate runs linked by `parent_run_id` and
+`parent_tool_call_id`, and a subagent cannot nest another Task.
 
 ### Storage
 
