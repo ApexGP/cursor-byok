@@ -61,6 +61,14 @@ async fn rules_and_skills_follow_cursor_injection_semantics() {
     assert!(!first_context.contains("RUST BODY"), "{first_context}");
     assert!(!first_context.contains("WEB BODY"), "{first_context}");
     assert!(!first_context.contains("MANUAL BODY"), "{first_context}");
+    assert!(
+        first_context.contains("<user_rule>\nBROKEN FRONTMATTER BODY\n</user_rule>"),
+        "malformed frontmatter falls back to always-apply: {first_context}"
+    );
+    assert!(
+        !first_context.contains("MALFORMED GLOB BODY"),
+        "an invalid glob must not inject its body: {first_context}"
+    );
     assert!(first_context.contains("general skill"), "{first_context}");
     assert!(!first_context.contains("ts skill"), "{first_context}");
     assert!(!first_context.contains("web skill"), "{first_context}");
@@ -104,6 +112,10 @@ async fn rules_and_skills_follow_cursor_injection_semantics() {
     assert!(
         third_history.contains("RUST BODY"),
         "earlier turn material stays in the append-only history"
+    );
+    assert!(
+        !third_history.contains("MALFORMED GLOB BODY"),
+        "an invalid glob never attaches, even when files are open: {third_history}"
     );
 
     registry.shutdown().await;
@@ -357,6 +369,19 @@ fn request_context(workspaces: &[&str]) -> pb::RequestContext {
                     globs: vec!["**/*.{tsx,jsx}".into()],
                 }),
             ),
+            typed_rule(
+                "MALFORMED GLOB BODY",
+                "malformed-glob.mdc",
+                pb::cursor_rule_type::Type::FileGlobbed(pb::CursorRuleTypeFileGlobs {
+                    globs: vec!["src/[unclosed".into()],
+                }),
+            ),
+            pb::CursorRule {
+                full_path: "/repo/.cursor/rules/broken-frontmatter.mdc".into(),
+                content: "BROKEN FRONTMATTER BODY".into(),
+                frontmatter: "---\nglobs: [unclosed\n---".into(),
+                ..Default::default()
+            },
             typed_rule(
                 "MANUAL BODY",
                 "manual.mdc",

@@ -363,4 +363,174 @@ mod tests {
         assert_eq!(characters(&snapshot, "mcp"), Some(dynamic_chars));
         assert_eq!(characters(&snapshot, "tools"), Some(static_chars));
     }
+
+    fn request_context(text: impl Into<String>) -> CanonicalMessage {
+        CanonicalMessage::text("request-context:test", Role::User, Origin::Prompt, text)
+    }
+
+    #[test]
+    fn malformed_sections_fall_back_to_conversation() {
+        for text in [
+            "<rules><user_rule>UNCLOSED",
+            "</rules>stray closing tag",
+            "<rules>one",
+            "<agent_skills",
+            "<mcp_meta_tools><mcp_tool>",
+        ] {
+            let snapshot = breakdown(
+                1_000,
+                100_000,
+                None,
+                "",
+                &[],
+                &HashSet::new(),
+                &[request_context(text)],
+            )
+            .unwrap();
+            assert_eq!(
+                characters(&snapshot, "conversation"),
+                Some(text.encode_utf16().count() as u32),
+                "unclosed or stray tags stay in Conversation: {text:?}"
+            );
+            assert_eq!(characters(&snapshot, "rules"), None, "{text:?}");
+            assert_eq!(characters(&snapshot, "skills"), None, "{text:?}");
+            assert_eq!(characters(&snapshot, "mcp"), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn nested_sections_count_once_for_the_outer_category() {
+        let text = "<rules><agent_skills>nested</agent_skills></rules>";
+        let snapshot = breakdown(
+            1_000,
+            100_000,
+            None,
+            "",
+            &[],
+            &HashSet::new(),
+            &[request_context(text)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            characters(&snapshot, "rules"),
+            Some(text.encode_utf16().count() as u32)
+        );
+        assert_eq!(
+            characters(&snapshot, "skills"),
+            None,
+            "overlapping ranges do not double count"
+        );
+    }
+
+    #[test]
+    fn sections_with_attributes_are_recognized() {
+        let text = "<agent_skills source=\"x\">desc</agent_skills>";
+        let snapshot = breakdown(
+            1_000,
+            100_000,
+            None,
+            "",
+            &[],
+            &HashSet::new(),
+            &[request_context(text)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            characters(&snapshot, "skills"),
+            Some(text.encode_utf16().count() as u32)
+        );
+    }
+
+    #[test]
+    fn empty_sections_still_belong_to_their_category() {
+        let text = "<rules></rules>";
+        let snapshot = breakdown(
+            1_000,
+            100_000,
+            None,
+            "",
+            &[],
+            &HashSet::new(),
+            &[request_context(text)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            characters(&snapshot, "rules"),
+            Some(text.encode_utf16().count() as u32)
+        );
+        assert!(tokens(&snapshot, "rules") > 0);
+    }
+
+    #[test]
+    fn every_text_part_is_measured_independently() {
+        let message = CanonicalMessage::parts(
+            "request-context:test",
+            Role::User,
+            Origin::Prompt,
+            vec![
+                ContentPart::Text {
+                    text: "<rules>A</rules>".into(),
+                },
+                ContentPart::Text {
+                    text: "plain".into(),
+                },
+            ],
+        );
+        let snapshot =
+            breakdown(1_000, 100_000, None, "", &[], &HashSet::new(), &[message]).unwrap();
+
+        assert_eq!(characters(&snapshot, "rules"), Some(16));
+        assert_eq!(characters(&snapshot, "conversation"), Some(5));
+    }
+
+    #[test]
+    fn assistant_text_is_conversation_even_with_section_tags() {
+        let message = CanonicalMessage {
+            message_id: "assistant".into(),
+            role: Role::Assistant,
+            origin: Origin::Assistant,
+            content: MessageContent::Assistant {
+                text: "<rules>assistant text</rules>".into(),
+                thinking: String::new(),
+                tool_round_id: None,
+                replay_state: None,
+                tool_calls: Vec::new(),
+            },
+            runtime_event_id: None,
+        };
+        let text = "<rules>assistant text</rules>";
+        let snapshot =
+            breakdown(1_000, 100_000, None, "", &[], &HashSet::new(), &[message]).unwrap();
+
+        assert_eq!(characters(&snapshot, "rules"), None);
+        assert_eq!(
+            characters(&snapshot, "conversation"),
+            Some((text.encode_utf16().count() + 2) as u32),
+            "assistant text plus the serialized empty tool-call list"
+        );
+    }
+
+    #[test]
+    fn unicode_sections_are_measured_by_utf16_width() {
+        let text = "<rules>规则</rules>";
+        let snapshot = breakdown(
+            1_000,
+            100_000,
+            None,
+            "",
+            &[],
+            &HashSet::new(),
+            &[request_context(text)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            characters(&snapshot, "rules"),
+            Some(text.encode_utf16().count() as u32)
+        );
+        assert!(tokens(&snapshot, "rules") > 0);
+    }
 }
