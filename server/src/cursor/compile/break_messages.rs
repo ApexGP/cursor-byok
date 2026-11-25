@@ -193,14 +193,8 @@ async fn compile_with_timestamp(
     compiler: &PromptCompiler,
     blobs: &BlobSynchronizer,
 ) -> Result<CanonicalMessage> {
-    let workspace = request_context
-        .env
-        .as_ref()
-        .and_then(|env| env.workspace_paths.first())
-        .map(String::as_str)
-        .unwrap_or_default();
     let attached_rules =
-        context::attached_context(request_context, &context::turn_files(user, workspace))
+        context::attached_context(request_context, &context::turn_files(request_context, user))
             .unwrap_or_default();
     let mut values = BTreeMap::from([
         ("OPEN_FILES", section(open_files(user))),

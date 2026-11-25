@@ -41,10 +41,15 @@ server/
 │   │   │   ├── pending.rs                      # ≈150 行；Run 边界上的待处理消息
 │   │   │   └── output.rs                       # ≈300 行；RunEvent 下行及 Step 记录
 │   │   │
-│   │   ├── compile/                            # ≈2,700 行；Cursor 输入编译
+│   │   ├── compile/                            # ≈3,100 行；Cursor 输入编译
 │   │   │   ├── mod.rs                          # ≈30 行；统一入口
 │   │   │   ├── run.rs                          # ≈650 行；RunRequest → PreparedRun
-│   │   │   ├── context.rs                      # ≈650 行；rules/skills/MCP/environment
+│   │   │   ├── context/                        # ≈1,600 行；rules/skills/MCP/environment
+│   │   │   │   ├── mod.rs                      # ≈720 行；request-context 组装、MCP、本地规则合并
+│   │   │   │   ├── rules.rs                    # ≈290 行；CursorRule 分类、frontmatter、skill 去重
+│   │   │   │   ├── globs.rs                    # ≈140 行；glob 拆分、匹配、平台大小写
+│   │   │   │   ├── turn.rs                     # ≈430 行；TurnFiles 和 glob 命中的每轮注入
+│   │   │   │   └── testing.rs                  # ≈40 行；测试构造器
 │   │   │   ├── action.rs                       # ≈250 行；Action 分类和路由
 │   │   │   ├── insert_messages.rs              # ≈400 行；非打断消息
 │   │   │   ├── break_messages.rs               # ≈400 行；打断当前 cycle 的消息

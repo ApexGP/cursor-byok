@@ -21,29 +21,8 @@ use prost::Message;
 #[tokio::test]
 async fn rules_and_skills_follow_cursor_injection_semantics() {
     let (_store_dir, store) = fixtures::temp_store().await;
-    let provider = fake_provider::FakeProvider::default();
-    for call in ["call-1", "call-2"] {
-        provider.push(vec![
-            ModelEvent::Start {
-                model_call_id: call.into(),
-            },
-            ModelEvent::TextStart,
-            ModelEvent::TextDelta("ok".into()),
-            ModelEvent::TextEnd,
-            ModelEvent::Done(FinishReason::Stop),
-        ]);
-    }
-    let assets = PromptAssets::load(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("prompt/cursor")
-            .as_path(),
-    )
-    .unwrap();
-    let registry = TransportRegistry::new(
-        store,
-        Arc::new(provider.clone()),
-        PromptCompiler::new(assets),
-    );
+    let provider = provider_with(&["call-1", "call-2", "call-3"]);
+    let registry = TransportRegistry::new(store, Arc::new(provider.clone()), prompt_compiler());
 
     let first = run_turn(
         &registry,
@@ -51,15 +30,21 @@ async fn rules_and_skills_follow_cursor_injection_semantics() {
         turn("first", "rules-user-1", "docs/readme.md", None),
     )
     .await;
-    run_turn(
+    let second = run_turn(
         &registry,
         "rules-request-2",
         turn("second", "rules-user-2", "src/main.rs", Some(first)),
     )
     .await;
+    run_turn(
+        &registry,
+        "rules-request-3",
+        turn("third", "rules-user-3", "app/web.tsx", Some(second)),
+    )
+    .await;
 
     let requests = provider.requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
 
     let first_context = only_request_context(&requests[0]);
     assert!(
@@ -74,9 +59,15 @@ async fn rules_and_skills_follow_cursor_injection_semantics() {
     );
     assert!(!first_context.contains("AGENT BODY"), "{first_context}");
     assert!(!first_context.contains("RUST BODY"), "{first_context}");
+    assert!(!first_context.contains("WEB BODY"), "{first_context}");
     assert!(!first_context.contains("MANUAL BODY"), "{first_context}");
     assert!(first_context.contains("general skill"), "{first_context}");
     assert!(!first_context.contains("ts skill"), "{first_context}");
+    assert!(!first_context.contains("web skill"), "{first_context}");
+    assert!(
+        first_context.contains("read the file at its fullPath before continuing"),
+        "the catalog must tell the agent the rules are not loaded: {first_context}"
+    );
     assert!(
         !history_text(&requests[0]).contains("RUST BODY"),
         "no open file matches src/**/*.rs on the first turn"
@@ -96,8 +87,83 @@ async fn rules_and_skills_follow_cursor_injection_semantics() {
         !second_history.contains("ts skill"),
         "glob scoped skills stay out until a matching file shows up"
     );
+    assert!(
+        !second_history.contains("WEB BODY"),
+        "brace globs must not attach before a matching file shows up: {second_history}"
+    );
+
+    let third_history = history_text(&requests[2]);
+    assert!(
+        third_history.contains("WEB BODY"),
+        "brace glob rules attach for a matching file: {third_history}"
+    );
+    assert!(
+        third_history.contains("web skill"),
+        "brace glob skills attach for a matching file: {third_history}"
+    );
+    assert!(
+        third_history.contains("RUST BODY"),
+        "earlier turn material stays in the append-only history"
+    );
 
     registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn glob_rules_attach_from_every_workspace_root() {
+    let (_store_dir, store) = fixtures::temp_store().await;
+    let provider = provider_with(&["call-1"]);
+    let registry = TransportRegistry::new(store, Arc::new(provider.clone()), prompt_compiler());
+
+    run_turn(
+        &registry,
+        "multi-root-request",
+        turn_in(
+            "second root",
+            "multi-root-user",
+            "/repo2/src/main.rs",
+            None,
+            &["/repo", "/repo2"],
+            None,
+        ),
+    )
+    .await;
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    let history = history_text(&requests[0]);
+    assert!(
+        history.contains("RUST BODY"),
+        "an open file in the second workspace root attaches the glob rule: {history}"
+    );
+
+    registry.shutdown().await;
+}
+
+fn prompt_compiler() -> PromptCompiler {
+    let assets = PromptAssets::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("prompt/cursor")
+            .as_path(),
+    )
+    .unwrap();
+    PromptCompiler::new(assets)
+}
+
+fn provider_with(calls: &[&str]) -> fake_provider::FakeProvider {
+    let provider = fake_provider::FakeProvider::default();
+    for call in calls {
+        provider.push(vec![
+            ModelEvent::Start {
+                model_call_id: (*call).into(),
+            },
+            ModelEvent::TextStart,
+            ModelEvent::TextDelta("ok".into()),
+            ModelEvent::TextEnd,
+            ModelEvent::Done(FinishReason::Stop),
+        ]);
+    }
+    provider
 }
 
 fn only_request_context(request: &ModelRequest) -> String {
@@ -191,6 +257,24 @@ fn turn(
     relative_path: &str,
     state: Option<pb::ConversationStateStructure>,
 ) -> pb::AgentClientMessage {
+    turn_in(
+        text,
+        message_id,
+        &format!("/repo/{relative_path}"),
+        Some(relative_path),
+        &["/repo"],
+        state,
+    )
+}
+
+fn turn_in(
+    text: &str,
+    message_id: &str,
+    path: &str,
+    relative_path: Option<&str>,
+    workspaces: &[&str],
+    state: Option<pb::ConversationStateStructure>,
+) -> pb::AgentClientMessage {
     pb::AgentClientMessage {
         message: Some(pb::agent_client_message::Message::RunRequest(
             pb::AgentRunRequest {
@@ -207,8 +291,9 @@ fn turn(
                                             pb::invocation_context::IdeState {
                                                 visible_files: vec![
                                                     pb::invocation_context::ide_state::File {
-                                                        path: format!("/repo/{relative_path}"),
-                                                        relative_path: Some(relative_path.into()),
+                                                        path: path.into(),
+                                                        relative_path: relative_path
+                                                            .map(str::to_string),
                                                         total_lines: 10,
                                                         ..Default::default()
                                                     },
@@ -225,7 +310,7 @@ fn turn(
                         },
                     )),
                     request_context_parts: Some(pb::RequestContextPartReferences {
-                        dynamic_context: Some(request_context()),
+                        dynamic_context: Some(request_context(workspaces)),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -243,7 +328,7 @@ fn turn(
     }
 }
 
-fn request_context() -> pb::RequestContext {
+fn request_context(workspaces: &[&str]) -> pb::RequestContext {
     pb::RequestContext {
         rules: vec![
             typed_rule(
@@ -266,6 +351,13 @@ fn request_context() -> pb::RequestContext {
                 }),
             ),
             typed_rule(
+                "WEB BODY",
+                "web.mdc",
+                pb::cursor_rule_type::Type::FileGlobbed(pb::CursorRuleTypeFileGlobs {
+                    globs: vec!["**/*.{tsx,jsx}".into()],
+                }),
+            ),
+            typed_rule(
                 "MANUAL BODY",
                 "manual.mdc",
                 pb::cursor_rule_type::Type::ManuallyAttached(
@@ -276,9 +368,10 @@ fn request_context() -> pb::RequestContext {
         agent_skills: vec![
             skill("general", "general skill", &[]),
             skill("ts-only", "ts skill", &["**/*.ts"]),
+            skill("web-only", "web skill", &["**/*.{tsx,jsx}"]),
         ],
         env: Some(pb::RequestContextEnv {
-            workspace_paths: vec!["/repo".into()],
+            workspace_paths: workspaces.iter().map(|path| (*path).to_string()).collect(),
             ..Default::default()
         }),
         ..Default::default()
