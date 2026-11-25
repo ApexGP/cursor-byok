@@ -127,8 +127,8 @@ fn measure_message(message: &CanonicalMessage, measures: &mut [Measure; 8]) -> R
         MessageContent::Parts { parts } => {
             for part in parts {
                 if let ContentPart::Text { text } = part {
-                    if message.origin == Origin::Runtime {
-                        measure_runtime(text, measures);
+                    if is_section_message(message) {
+                        measure_sections(text, measures);
                     } else {
                         measures[CONVERSATION].add(text);
                     }
@@ -152,10 +152,17 @@ fn measure_message(message: &CanonicalMessage, measures: &mut [Measure; 8]) -> R
     Ok(())
 }
 
-fn measure_runtime(text: &str, measures: &mut [Measure; 8]) {
+/// Messages whose text carries independently attributable sections: the
+/// per-turn runtime message and the append-only request context.
+fn is_section_message(message: &CanonicalMessage) -> bool {
+    message.origin == Origin::Runtime || message.message_id.starts_with("request-context:")
+}
+
+fn measure_sections(text: &str, measures: &mut [Measure; 8]) {
     let mut ranges = Vec::new();
     collect_ranges(text, "rules", RULES, &mut ranges);
     collect_ranges(text, "rule", RULES, &mut ranges);
+    collect_ranges(text, "agent_rules", RULES, &mut ranges);
     collect_ranges(text, "agent_skills", SKILLS, &mut ranges);
     collect_ranges(text, "skill", SKILLS, &mut ranges);
     collect_ranges(text, "subagents", SUBAGENTS, &mut ranges);
@@ -215,5 +222,141 @@ fn fit_special_estimates(estimates: &mut [u64; 8], total: u64) {
         }
         estimates[index] += 1;
         remainder -= 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::model::{CanonicalMessage, Origin, Role, ToolDefinition};
+
+    fn category<'a>(
+        snapshot: &'a pb::PromptTokenBreakdownSnapshot,
+        id: &str,
+    ) -> &'a pb::PromptTokenBreakdownCategory {
+        snapshot
+            .categories
+            .iter()
+            .find(|category| category.id == id)
+            .unwrap_or_else(|| panic!("missing category {id}"))
+    }
+
+    fn characters(snapshot: &pb::PromptTokenBreakdownSnapshot, id: &str) -> Option<u32> {
+        category(snapshot, id).character_count
+    }
+
+    fn tokens(snapshot: &pb::PromptTokenBreakdownSnapshot, id: &str) -> u32 {
+        category(snapshot, id).estimated_tokens
+    }
+
+    const RULES: &str = "<rules><user_rule>RULE</user_rule></rules>";
+    const AGENT_RULES: &str =
+        "<agent_rules>not loaded<agent_rule fullPath=\"x\" description=\"y\"/></agent_rules>";
+    const SKILLS: &str = "<agent_skills><available_skills><agent_skill fullPath=\"s\">desc</agent_skill></available_skills></agent_skills>";
+    const SUBAGENTS: &str = "<subagents><subagent name=\"a\">d</subagent></subagents>";
+    const MCP: &str =
+        "<mcp_meta_tools><mcp_meta_tool_server name=\"s\" identifier=\"i\"/></mcp_meta_tools>";
+    const ENV: &str = "<user_info>env</user_info>";
+
+    #[test]
+    fn request_context_sections_are_attributed_to_their_categories() {
+        let text = [ENV, RULES, AGENT_RULES, SKILLS, SUBAGENTS, MCP].join("\n\n");
+        let separators = 2 * 5;
+        let message =
+            CanonicalMessage::text("request-context:test", Role::User, Origin::Prompt, text);
+
+        let snapshot =
+            breakdown(20_000, 500_000, None, "", &[], &HashSet::new(), &[message]).unwrap();
+
+        assert_eq!(
+            characters(&snapshot, "rules"),
+            Some((RULES.len() + AGENT_RULES.len()) as u32),
+            "the agent-decided rule catalog belongs to Rules"
+        );
+        assert_eq!(characters(&snapshot, "skills"), Some(SKILLS.len() as u32));
+        assert_eq!(
+            characters(&snapshot, "subagents"),
+            Some(SUBAGENTS.len() as u32)
+        );
+        assert_eq!(characters(&snapshot, "mcp"), Some(MCP.len() as u32));
+        assert_eq!(
+            characters(&snapshot, "conversation"),
+            Some((ENV.len() + separators) as u32),
+            "environment blocks and section separators stay in Conversation"
+        );
+        assert!(tokens(&snapshot, "rules") > 0);
+        assert!(tokens(&snapshot, "skills") > 0);
+        assert!(tokens(&snapshot, "subagents") > 0);
+        assert!(tokens(&snapshot, "mcp") > 0);
+
+        let special = (0..CONVERSATION)
+            .map(|index| tokens(&snapshot, CATEGORIES[index].0))
+            .sum::<u32>();
+        assert_eq!(tokens(&snapshot, "conversation"), 20_000 - special);
+    }
+
+    #[test]
+    fn runtime_sections_keep_being_attributed() {
+        let message = CanonicalMessage::text("runtime:event", Role::User, Origin::Runtime, RULES);
+
+        let snapshot =
+            breakdown(5_000, 500_000, None, "", &[], &HashSet::new(), &[message]).unwrap();
+
+        assert_eq!(characters(&snapshot, "rules"), Some(RULES.len() as u32));
+        assert_eq!(characters(&snapshot, "conversation"), None);
+    }
+
+    #[test]
+    fn plain_user_text_is_conversation_even_with_section_tags() {
+        let message = CanonicalMessage::text("user", Role::User, Origin::User, RULES);
+
+        let snapshot =
+            breakdown(5_000, 500_000, None, "", &[], &HashSet::new(), &[message]).unwrap();
+
+        assert_eq!(characters(&snapshot, "rules"), None);
+        assert_eq!(
+            characters(&snapshot, "conversation"),
+            Some(RULES.len() as u32)
+        );
+    }
+
+    #[test]
+    fn dynamic_mcp_tools_are_separated_from_static_tools() {
+        let dynamic = ToolDefinition {
+            name: "mcp__browser".into(),
+            description: "drive the browser".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        let dynamic_chars = serde_json::to_string(&dynamic)
+            .unwrap()
+            .encode_utf16()
+            .count() as u32;
+        let static_tool = ToolDefinition {
+            name: "Read".into(),
+            description: "read a file".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        let static_chars = serde_json::to_string(&static_tool)
+            .unwrap()
+            .encode_utf16()
+            .count() as u32;
+        let dynamic_names = HashSet::from(["mcp__browser".to_string()]);
+
+        let snapshot = breakdown(
+            1_000,
+            100_000,
+            None,
+            "sys",
+            &[dynamic, static_tool],
+            &dynamic_names,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(characters(&snapshot, "system_prompt"), Some(3));
+        assert_eq!(characters(&snapshot, "mcp"), Some(dynamic_chars));
+        assert_eq!(characters(&snapshot, "tools"), Some(static_chars));
     }
 }
