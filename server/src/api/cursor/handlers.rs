@@ -411,9 +411,26 @@ fn parent_headers(headers: &HeaderMap) -> Result<Option<TransportParent>> {
             request_id: request_id.into(),
             tool_call_id: tool_call_id.into(),
         })),
-        _ => Err(crate::Error::Protocol(
-            "Cursor subagent request must include both parent headers".into(),
-        )),
+        // Cursor adds the two headers independently. Checkpoint projection
+        // only consumes the tool call id, so a missing request id must not
+        // reject the subagent run.
+        (None, Some(tool_call_id)) => {
+            tracing::warn!(
+                tool_call_id,
+                "Cursor subagent request has no x-parent-request-id; using the tool call id"
+            );
+            Ok(Some(TransportParent {
+                request_id: tool_call_id.into(),
+                tool_call_id: tool_call_id.into(),
+            }))
+        }
+        (Some(request_id), None) => {
+            tracing::warn!(
+                request_id,
+                "Cursor subagent request has no parent tool call id; treating it as a root run"
+            );
+            Ok(None)
+        }
     }
 }
 
@@ -423,4 +440,45 @@ fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>
         .map(|value| value.to_str())
         .transpose()
         .map_err(|error| crate::Error::Protocol(format!("invalid {name} header: {error}")))
+}
+
+#[cfg(test)]
+mod parent_header_tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn accepts_a_tool_call_id_without_a_parent_request_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-parent-agent-tool-call-id",
+            HeaderValue::from_static("call-1"),
+        );
+
+        let parent = parent_headers(&headers).unwrap().expect("parent");
+        assert_eq!(parent.tool_call_id, "call-1");
+        assert_eq!(parent.request_id, "call-1");
+    }
+
+    #[test]
+    fn ignores_a_parent_request_id_without_a_tool_call_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-parent-request-id", HeaderValue::from_static("request-1"));
+
+        assert!(parent_headers(&headers).unwrap().is_none());
+    }
+
+    #[test]
+    fn keeps_both_parent_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-parent-request-id", HeaderValue::from_static("request-1"));
+        headers.insert(
+            "x-parent-agent-tool-call-id",
+            HeaderValue::from_static("call-1"),
+        );
+
+        let parent = parent_headers(&headers).unwrap().expect("parent");
+        assert_eq!(parent.request_id, "request-1");
+        assert_eq!(parent.tool_call_id, "call-1");
+    }
 }
