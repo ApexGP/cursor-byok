@@ -1,4 +1,5 @@
 # AGENTS.md
+- Read [CONTRIBUTING.md](./CONTRIBUTING.md) before changing code, and report vulnerabilities per [SECURITY.md](./SECURITY.md).
 - **The directory structure is the architecture.** Simple, clear directory and module naming >= module dependency relationships > concrete implementation details; communicate with the user using directory trees.
 - Do not preserve backward compatibility. Remove obsolete paths instead of adding compatibility layers, fallbacks, or migrations.
 - Choose the simplest implementation that fully meets the current requirements. Avoid speculative abstractions, configuration, and indirection.

@@ -170,41 +170,12 @@ cursor-byok/
 
 </details>
 
-## 本地开发
-
-### 环境要求
-
-- Rust 工具链和 Cargo
-- Node.js 与 npm
-- Tauri 2 的系统构建依赖
-- Docker（仅在构建 Docker 镜像时需要）
-
-### 安装依赖
-
-```bash
-npm --prefix apps/desktop install
-```
-
-### 启动开发环境
-
-```bash
-make dev-web       # 桌面前端
-make dev-desktop   # 桌面应用
-```
-
-### 检查与构建
-
-```bash
-make check          # 完整检查
-make build-web      # 构建桌面前端
-make build-server   # 构建 Rust 本地服务
-make build-desktop  # 构建 Tauri 桌面安装包
-make build-docker   # 构建 Docker 镜像
-```
+服务端模块图、请求生命周期和检查点不变量见 [CONTRIBUTING.md](./CONTRIBUTING.md#architecture)。
 
 ## 社区与反馈
 
 - [GitHub Issues](https://github.com/ApexGP/cursor-byok/issues)
+- 安全报告：请遵循 [SECURITY.md](./SECURITY.md)，不要公开提交 Issue
 - [Telegram 社区](https://t.me/cursor_byok)
 - QQ 群：`1095916242`、`1094411438`、`1095918002`、`1094419321`
 
@@ -212,7 +183,7 @@ make build-docker   # 构建 Docker 镜像
 
 ## 参与贡献
 
-欢迎提交 Issue 和 Pull Request。提交代码前请阅读 [AGENTS.md](./AGENTS.md) 中的开发约定，并运行 `make check` 确认格式、测试和前端构建检查通过。
+欢迎提交 Issue 和 Pull Request。开发环境、架构、测试和评审要求见 [CONTRIBUTING.md](./CONTRIBUTING.md)；仓库的强制开发约定见 [AGENTS.md](./AGENTS.md)；漏洞请按 [SECURITY.md](./SECURITY.md) 私下报告。提交代码前请运行 `make check`。
 
 ## 贡献者
 

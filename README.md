@@ -170,41 +170,12 @@ cursor-byok/
 
 </details>
 
-## Development
-
-### Requirements
-
-- Rust toolchain and Cargo
-- Node.js and npm
-- Tauri 2 system dependencies
-- Docker (only when building the Docker image)
-
-### Install dependencies
-
-```bash
-npm --prefix apps/desktop install
-```
-
-### Start the development environment
-
-```bash
-make dev-web       # desktop frontend
-make dev-desktop   # desktop application
-```
-
-### Check and build
-
-```bash
-make check          # full check
-make build-web      # build the desktop frontend
-make build-server   # build the local Rust service
-make build-desktop  # build Tauri installers
-make build-docker   # build the Docker image
-```
+For the server-level module map, request lifecycle, and checkpoint invariants, see [CONTRIBUTING.md](./CONTRIBUTING.md#architecture).
 
 ## Community and Support
 
 - [GitHub Issues](https://github.com/ApexGP/cursor-byok/issues)
+- Security reports: follow [SECURITY.md](./SECURITY.md); do not open a public issue
 - [Telegram community](https://t.me/cursor_byok)
 - QQ groups: `1095916242`, `1094411438`, `1095918002`, `1094419321`
 
@@ -212,7 +183,7 @@ When reporting an issue, include your OS, cursor-byok version, model type, reque
 
 ## Contributing
 
-Issues and pull requests are welcome. Before submitting code, read [AGENTS.md](./AGENTS.md) for repository development conventions and run `make check` to verify formatting, tests, and the frontend build.
+Issues and pull requests are welcome. Read [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup, architecture, and review requirements; [AGENTS.md](./AGENTS.md) for the binding repository conventions; and [SECURITY.md](./SECURITY.md) for private vulnerability reporting. Run `make check` before opening a pull request.
 
 ## Contributors
 
