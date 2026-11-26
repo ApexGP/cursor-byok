@@ -2,19 +2,27 @@
 use serde_json::Value;
 
 use crate::{
-    cursor::{protocol::proto::agent::v1 as pb, tools::codec as interaction},
+    cursor::{
+        protocol::proto::agent::v1 as pb, tools::codec as interaction, tools::runtime::ExecContext,
+    },
     model::{ToolCall, ToolResult},
     Error, Result,
 };
 
-use super::{now_ms, ToolCompletion};
+use super::{goal, now_ms, ToolCompletion};
 
 const SUBAGENTS_DISABLED_REMINDER: &str = "<system_reminder>The user has disabled the subagent model. Please remind the user to enable it in Cursor Settings → Models → Explore Subagent Model.</system_reminder>";
 
-pub(crate) fn local(call: &ToolCall, message_index: usize) -> Result<ToolCompletion> {
+pub(crate) fn local(
+    call: &ToolCall,
+    message_index: usize,
+    context: &ExecContext,
+) -> Result<ToolCompletion> {
     match normalized(&call.name).as_str() {
         "todowrite" => todo_write(call),
         "updatecurrentstep" => update_current_step(call, message_index),
+        "creategoal" => goal::create(call, context),
+        "updategoal" => goal::update(call, context),
         _ => Err(Error::Protocol(format!("unsupported tool: {}", call.name))),
     }
 }

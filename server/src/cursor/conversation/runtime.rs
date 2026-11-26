@@ -6,8 +6,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cursor::{
-        checkpoint::CheckpointBuilder,
+        checkpoint::{CheckpointBuilder, PendingSteps},
         compile,
+        goal::GoalHandle,
         protocol::proto::agent::v1 as pb,
         services::{blob_sync::BlobSynchronizer, context_sync::RequestContextSynchronizer},
         tools::{
@@ -34,6 +35,7 @@ const CONTINUATION_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from
 struct RunGeneration {
     id: u64,
     request: pb::AgentRunRequest,
+    goal: GoalHandle,
     superseded: CancellationToken,
     finished: CancellationToken,
     run: Arc<parking_lot::Mutex<Option<RunHandle>>>,
@@ -230,6 +232,7 @@ impl ConversationRuntime {
                                             &mut current,
                                             &mut next_generation,
                                             request,
+                                            None,
                                         )
                                         .await;
                                     }
@@ -386,7 +389,7 @@ impl ConversationRuntime {
                                     // ShellCommandAction, StartPlanAction,
                                     // AsyncAskQuestionCompletionAction, BackgroundShellAction,
                                     // BackgroundSubagentAction,
-                                    // SubscriptionNotificationAction and GoalContinuationAction.
+                                    // SubscriptionNotificationAction.
                                     // Variants whose wire behavior is not captured yet need evidence
                                     // before assigning semantics. Every unsupported runtime Action must
                                     // return an explicit Protocol Error rather than falling through silently.
@@ -421,6 +424,7 @@ impl ConversationRuntime {
                                             request.action = Some(conversation_action);
                                             request.conversation_state = None;
                                             request.pre_fetched_blobs.clear();
+                                            let goal = previous.goal.clone();
                                             waiting_for_action = false;
                                             start_generation(
                                                 &registry,
@@ -432,6 +436,7 @@ impl ConversationRuntime {
                                                 &mut current,
                                                 &mut next_generation,
                                                 request,
+                                                Some(goal),
                                             )
                                             .await;
                                         }
@@ -481,6 +486,45 @@ impl ConversationRuntime {
                                                 }
                                             }
                                         }
+                                        Some(
+                                            pb::conversation_action::Action::GoalContinuationAction(
+                                                _,
+                                            ),
+                                        ) => {
+                                            let Some(previous) = current.as_ref() else {
+                                                continue;
+                                            };
+                                            let goal = previous.goal.clone();
+                                            let mut request = previous.request.clone();
+                                            request.action = Some(conversation_action);
+                                            if let Some(mut state) =
+                                                request.conversation_state.clone()
+                                            {
+                                                state.goal_state = goal.snapshot();
+                                                request.conversation_state = Some(state);
+                                            } else {
+                                                request.conversation_state =
+                                                    Some(pb::ConversationStateStructure {
+                                                        goal_state: goal.snapshot(),
+                                                        ..Default::default()
+                                                    });
+                                            }
+                                            request.pre_fetched_blobs.clear();
+                                            waiting_for_action = false;
+                                            start_generation(
+                                                &registry,
+                                                &handle,
+                                                &dependencies,
+                                                &blob_sync,
+                                                &context_sync,
+                                                &tool_runtime_factory,
+                                                &mut current,
+                                                &mut next_generation,
+                                                request,
+                                                Some(goal),
+                                            )
+                                            .await;
+                                        }
                                         Some(action) => {
                                             tracing::warn!(
                                                 request_id = handle.request_id(),
@@ -521,6 +565,7 @@ async fn start_generation(
     current: &mut Option<RunGeneration>,
     next_generation: &mut u64,
     request: pb::AgentRunRequest,
+    previous_goal: Option<GoalHandle>,
 ) {
     let previous_finished = if let Some(previous) = current.take() {
         previous.superseded.cancel();
@@ -538,6 +583,13 @@ async fn start_generation(
     let (runtime_actions, runtime_action_receiver) =
         mpsc::unbounded_channel::<compile::RuntimeAction>();
     let tool_runtime = tool_runtime_factory.next_run();
+    let goal = GoalHandle::new(
+        request
+            .conversation_state
+            .as_ref()
+            .and_then(|state| state.goal_state.clone())
+            .or_else(|| previous_goal.and_then(|goal| goal.snapshot())),
+    );
     let tools = ToolDispatcher::with_results(
         tool_runtime.clone(),
         results.clone(),
@@ -547,6 +599,7 @@ async fn start_generation(
     let generation = RunGeneration {
         id: *next_generation,
         request: request.clone(),
+        goal,
         superseded: CancellationToken::new(),
         finished: CancellationToken::new(),
         run: Arc::new(parking_lot::Mutex::new(None)),
@@ -661,6 +714,7 @@ fn spawn_run_request(
             blob_sync.clone(),
             handle.parent().map(|parent| parent.tool_call_id.clone()),
             request.conversation_state.clone(),
+            generation.goal.clone(),
         );
         let subagent_model = handle
             .parent()
@@ -711,6 +765,50 @@ fn spawn_run_request(
             context.dynamic_tools.keys().cloned().collect(),
             context.turn_user.clone(),
         );
+        if context.skip_model {
+            let messages = dependencies
+                .store
+                .load_checkpoint_messages(prepared.base_checkpoint_id)
+                .await;
+            let state = match messages {
+                Ok(messages) => {
+                    checkpoint
+                        .settled(&messages, context.mode, &PendingSteps::default())
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            let finish = match state {
+                Ok(state) => match checkpoint.publish(&handle, &state).await {
+                    Ok(()) => RunFinish::Transport(TransportFinish::Success),
+                    Err(error) => {
+                        tracing::error!(
+                            request_id = handle.request_id(),
+                            %error,
+                            "failed to publish goal checkpoint"
+                        );
+                        RunFinish::Transport(TransportFinish::Failed(error))
+                    }
+                },
+                Err(error) => {
+                    tracing::error!(
+                        request_id = handle.request_id(),
+                        %error,
+                        "failed to build goal checkpoint"
+                    );
+                    RunFinish::Transport(TransportFinish::Failed(error))
+                }
+            };
+            if !generation.superseded.is_cancelled() {
+                let _ = handle
+                    .command(TransportCommand::RunFinished {
+                        generation: generation.id,
+                        finish,
+                    })
+                    .await;
+            }
+            return;
+        }
         if context.background_completion {
             let event_id = prepared
                 .initial_messages

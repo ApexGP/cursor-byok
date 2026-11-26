@@ -1,6 +1,7 @@
 //! Converts completed Tool work into canonical Tool results.
 mod exec;
 mod gate;
+mod goal;
 mod interaction;
 mod local;
 mod mcp;

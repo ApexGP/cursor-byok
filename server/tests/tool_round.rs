@@ -55,6 +55,8 @@ fn exec_context() -> ExecContext {
         allow_subagents: true,
         subagents_disabled: false,
         mcp_routes: std::collections::HashMap::new(),
+        agent_session_id: None,
+        goal: Default::default(),
     }
 }
 

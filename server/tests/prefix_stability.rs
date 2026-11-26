@@ -140,7 +140,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             .as_path(),
     )
     .unwrap();
-    assert_eq!(assets.mode(Mode::Agent).tools.len(), 21);
+    assert_eq!(assets.mode(Mode::Agent).tools.len(), 23);
     assert_eq!(
         assets
             .mode(Mode::Agent)
@@ -170,6 +170,8 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "CallMcpTool",
             "SembleSearch",
             "SembleFindRelated",
+            "CreateGoal",
+            "UpdateGoal",
         ]
     );
     assert_mode(
@@ -193,8 +195,10 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "Write",
             "SembleSearch",
             "SembleFindRelated",
+            "CreateGoal",
+            "UpdateGoal",
         ],
-        "5e94294a3a9926ec118f5760eb0e50fac10b3d94c6dbe8a591b25c5f3280a364",
+        "36755d62c3abb6fc63eb8258169f0107c2d3305d1982fef50e9f09d8c4cba76e",
     );
     assert_mode(
         &assets,
@@ -215,8 +219,10 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "CallMcpTool",
             "SembleSearch",
             "SembleFindRelated",
+            "CreateGoal",
+            "UpdateGoal",
         ],
-        "3e5bdefc747f21a3b653c373bcd16cf1946d37e87c02052ab1d3d42988a2c84c",
+        "e62e8d551bc0b1db24453a5bfeb1f220c26874b0bd57e2f8732b6b9432546da7",
     );
     assert_mode(
         &assets,
@@ -239,8 +245,10 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "Write",
             "SembleSearch",
             "SembleFindRelated",
+            "CreateGoal",
+            "UpdateGoal",
         ],
-        "5e94294a3a9926ec118f5760eb0e50fac10b3d94c6dbe8a591b25c5f3280a364",
+        "36755d62c3abb6fc63eb8258169f0107c2d3305d1982fef50e9f09d8c4cba76e",
     );
     assert_mode(
         &assets,
@@ -265,8 +273,10 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "GenerateImage",
             "SembleSearch",
             "SembleFindRelated",
+            "CreateGoal",
+            "UpdateGoal",
         ],
-        "0c092aaa37706945e148bce79a581836d1efbcf93883d8446bf591d323b5637a",
+        "ab048057898521f39e117fa9636dfcf19d2205f86031d9043357e9a3d3b69cd3",
     );
     assert_mode(
         &assets,
@@ -303,7 +313,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
     );
     assert_eq!(
         schema_digest(&assets.mode(Mode::Agent).tools),
-        "b11e0a44e00b0f45afcda31c63d1ec1f857c1f908b7527c502bd2697b42bf067"
+        "8382f2b91516df770f56d3555d6e3ef1fcbabcd156e00864784ffb45a06b189e"
     );
     let task = assets
         .mode(Mode::Agent)
