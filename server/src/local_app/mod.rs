@@ -1,10 +1,12 @@
 //! Exposes the local desktop application integration.
 mod account;
 mod ca;
+mod composer_state;
 pub(crate) mod model_cache;
 mod process;
 mod proxy;
 mod settings;
+mod state_db;
 
 use std::{
     net::SocketAddr,

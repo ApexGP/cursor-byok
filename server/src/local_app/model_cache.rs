@@ -9,10 +9,7 @@
 //! the sync only runs while Cursor is stopped; restart paths stop Cursor, sync,
 //! then launch it again.
 
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 
 use serde_json::{json, Map, Value};
 use sqlx::{sqlite::SqliteConnectOptions, Connection, Row, SqliteConnection};
@@ -54,6 +51,9 @@ pub async fn sync_with(store: &Store, service_url: Option<&str>) -> Result<Curso
     let path = account::state_db_path()?;
     if !path.exists() {
         return Ok(CursorCatalogSync::default());
+    }
+    if let Err(error) = super::composer_state::repair_interrupted_generations(&path).await {
+        tracing::warn!(%error, "failed to repair interrupted composer generations");
     }
     let models = store.models().await?;
     sync_at_with_service(&path, &models, service_url).await
@@ -150,7 +150,7 @@ pub(crate) async fn sync_at_with_service(
         );
     } else {
         let updated = serde_json::to_string(&root)?;
-        backup(path)?;
+        super::state_db::backup(path, BACKUP_EXTENSION)?;
         let mut transaction = connection.begin().await?;
         sqlx::query("INSERT OR REPLACE INTO ItemTable(key, value) VALUES(?, ?)")
             .bind(APP_USER_KEY)
@@ -324,24 +324,6 @@ fn remove_ids(settings: &mut Map<String, Value>, key: &str, ids: &[String]) {
 
 fn string_array(values: &[String]) -> Value {
     Value::Array(values.iter().cloned().map(Value::String).collect())
-}
-
-fn backup(path: &Path) -> Result<PathBuf> {
-    let backup = path.with_extension(BACKUP_EXTENSION);
-    std::fs::copy(path, &backup)?;
-    for suffix in ["-wal", "-shm"] {
-        let source = sidecar_path(path, suffix);
-        if source.exists() {
-            std::fs::copy(&source, sidecar_path(&backup, suffix))?;
-        }
-    }
-    Ok(backup)
-}
-
-fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = path.as_os_str().to_os_string();
-    value.push(suffix);
-    PathBuf::from(value)
 }
 
 #[cfg(test)]

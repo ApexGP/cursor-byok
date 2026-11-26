@@ -256,6 +256,14 @@ legacy `update.json`, and Windows portable `portable-latest.json`. Do not mix
 them. Releases are owner-gated and use signed or checksummed artifacts; version
 bumps and release changes are maintainer work, not part of a feature PR.
 
+Startup sync repairs Cursor's persisted composer cache (`state.vscdb`) while
+Cursor is stopped: a composer whose `chatGenerationUUID` is still set but that
+is no longer generating, with no action manager owning the stream, has the
+sentinel cleared before Cursor loads it. The repair rewrites the composer row,
+so the stopped check must cover the whole read-modify-write. It copies the
+database and its WAL/SHM sidecars to `state.vscdb.cursor-byok.composer.bak`
+before writing and commits the updates in one transaction.
+
 ### Diagnostics
 
 Capture only terminal failures: run outcomes, sync errors, Cursor stop/launch
