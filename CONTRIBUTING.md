@@ -62,14 +62,13 @@ npm --prefix apps/desktop install
 | `make build-desktop` | Build Tauri installers |
 | `make build-docker` | Build the container image |
 
-`make check` is the minimum local gate. CI also runs checks that `make check`
-does not:
+`make check` is the minimum local gate: formatting, workspace Clippy and tests,
+the frontend check, and release-script tests. CI repeats those on Linux and
+additionally runs:
 
-- Linux: `cargo fmt`, `cargo clippy --workspace --all-targets -D warnings`, and
-  `cargo test --workspace --all-targets`.
 - macOS and Windows: platform Clippy for the desktop crate and native SQLite
   storage tests.
-- Frontend job: release-note scripts, `support/diagnostics` parser tests, and
+- Frontend job: `support/diagnostics` parser tests and
   `support/diagnostics-relay` tests.
 - Go tests for `support/cursor-capture` and
   `support/cursor-protocol-extractor` are not covered by CI. Run them locally
