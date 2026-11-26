@@ -1,6 +1,7 @@
 //! Compiles rules, skills, MCP metadata, and environment context.
 mod globs;
 mod rules;
+mod skills;
 mod turn;
 
 use std::{
@@ -203,7 +204,11 @@ pub fn request_context(request: &pb::AgentRunRequest) -> Option<&pb::RequestCont
         })
 }
 
-pub fn compile_context(context: &pb::RequestContext, today: &str) -> String {
+pub fn compile_context(
+    context: &pb::RequestContext,
+    today: &str,
+    context_window_tokens: Option<u64>,
+) -> String {
     let mut sections = Vec::new();
     let mut transcripts = None;
     if let Some(env) = &context.env {
@@ -278,17 +283,8 @@ pub fn compile_context(context: &pb::RequestContext, today: &str) -> String {
             catalogs.join("\n")
         ));
     }
-    let skill_entries = context
-        .agent_skills
-        .iter()
-        .filter(|skill| !skill.disable_model_invocation && skill.globs.is_empty())
-        .map(rules::skill_entry)
-        .collect::<Vec<_>>();
-    if !skill_entries.is_empty() {
-        sections.push(format!(
-            "<agent_skills>\n<available_skills>\n{}\n</available_skills>\n</agent_skills>",
-            skill_entries.join("\n")
-        ));
+    if let Some(section) = skills::section(context, context_window_tokens) {
+        sections.push(section);
     }
     let subagents = context
         .custom_subagents
@@ -705,7 +701,7 @@ mod tests {
             ..Default::default()
         };
 
-        let text = compile_context(&context, "2026-11-24");
+        let text = compile_context(&context, "2026-11-24", None);
         assert!(text.contains("<user_rule>\nALWAYS BODY\n</user_rule>"));
         assert!(text.contains(
             "<agent_rule fullPath=\"/repo/.cursor/rules/rule.mdc\" description=\"API conventions\"/>"
@@ -714,8 +710,8 @@ mod tests {
         assert!(!text.contains("AGENT BODY"), "{text}");
         assert!(!text.contains("RUST BODY"), "{text}");
         assert!(!text.contains("MANUAL BODY"), "{text}");
-        assert!(text.contains("general skill"));
-        assert!(!text.contains("ts skill"), "{text}");
+        assert!(text.contains("<agent_skill fullPath=\"SKILL.md\" />"));
+        assert!(!text.contains("fullPath=\"scoped/SKILL.md\""), "{text}");
     }
 
     #[test]
@@ -730,7 +726,7 @@ mod tests {
             ..Default::default()
         };
 
-        let text = compile_context(&context, "2026-11-24");
+        let text = compile_context(&context, "2026-11-24", None);
         assert!(
             text.contains("<agent_rules>\nRules below are not loaded."),
             "{text}"
@@ -751,7 +747,7 @@ mod tests {
             ..Default::default()
         };
 
-        let text = compile_context(&context, "2026-11-24");
+        let text = compile_context(&context, "2026-11-24", None);
         assert!(!text.contains("<agent_rules>"), "{text}");
     }
 
@@ -772,8 +768,11 @@ mod tests {
             ..Default::default()
         };
 
-        let text = compile_context(&context, "2026-11-24");
-        assert!(text.contains("tdd skill"), "{text}");
+        let text = compile_context(&context, "2026-11-24", None);
+        assert!(
+            text.contains("<agent_skill fullPath=\"$0/tdd/SKILL.md\" />"),
+            "{text}"
+        );
         assert!(!text.contains("<user_rule>"), "{text}");
     }
 
@@ -794,8 +793,11 @@ mod tests {
             ..Default::default()
         };
 
-        let text = compile_context(&context, "2026-11-24");
-        assert!(text.contains("tdd skill"), "{text}");
+        let text = compile_context(&context, "2026-11-24", None);
+        assert!(
+            text.contains("<agent_skill fullPath=\"$0/tdd/SKILL.md\" />"),
+            "{text}"
+        );
         assert!(
             !text.contains("<user_rule>"),
             "identical content is projected through the skill entry only: {text}"
@@ -822,7 +824,7 @@ mod tests {
             ..Default::default()
         };
 
-        let text = compile_context(&context, "2026-11-24");
+        let text = compile_context(&context, "2026-11-24", None);
         assert!(
             text.contains("fullPath=\"/repo/a&amp;b&quot;c&lt;d&gt;.mdc\""),
             "{text}"
@@ -836,8 +838,8 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains(">d &amp; &quot;q&quot; &lt;x&gt;</agent_skill>"),
-            "{text}"
+            text.contains("fullPath=\"/repo/s&amp;k&quot;&lt;1&gt;/SKILL.md\" />"),
+            "user skills keep their path without a description: {text}"
         );
     }
 
@@ -862,7 +864,7 @@ mod tests {
             ..Default::default()
         };
 
-        let text = compile_context(&context, "2026-11-24");
+        let text = compile_context(&context, "2026-11-24", None);
         assert!(
             text.contains("<user_rule>\nEMPTY DESCRIPTION\n</user_rule>"),
             "{text}"
@@ -894,7 +896,7 @@ mod tests {
             ..Default::default()
         };
 
-        let text = compile_context(&context, "2026-11-24");
+        let text = compile_context(&context, "2026-11-24", None);
         assert_eq!(text.matches("<agent_rule ").count(), 1, "{text}");
         assert!(text.contains("description=\"first description\""), "{text}");
         assert!(!text.contains("second description"), "{text}");
@@ -907,7 +909,7 @@ mod tests {
             ..Default::default()
         };
 
-        let text = compile_context(&context, "2026-11-24");
+        let text = compile_context(&context, "2026-11-24", None);
         assert!(!text.contains("<rules>"), "{text}");
         assert!(!text.contains("<user_rule>"), "{text}");
     }
@@ -923,7 +925,7 @@ mod tests {
             ..Default::default()
         };
 
-        let text = compile_context(&context, "2026-11-24");
+        let text = compile_context(&context, "2026-11-24", None);
         let rules = text.find("<rules>").expect("rules section");
         let skills = text.find("<agent_skills>").expect("skills section");
         assert!(rules < skills, "{text}");

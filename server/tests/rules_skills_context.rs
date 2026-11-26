@@ -69,9 +69,18 @@ async fn rules_and_skills_follow_cursor_injection_semantics() {
         !first_context.contains("MALFORMED GLOB BODY"),
         "an invalid glob must not inject its body: {first_context}"
     );
-    assert!(first_context.contains("general skill"), "{first_context}");
-    assert!(!first_context.contains("ts skill"), "{first_context}");
-    assert!(!first_context.contains("web skill"), "{first_context}");
+    assert!(
+        first_context.contains("$0/general/SKILL.md"),
+        "{first_context}"
+    );
+    assert!(
+        !first_context.contains("ts-only/SKILL.md"),
+        "{first_context}"
+    );
+    assert!(
+        !first_context.contains("web-only/SKILL.md"),
+        "{first_context}"
+    );
     assert!(
         first_context.contains("read the file at its fullPath before continuing"),
         "the catalog must tell the agent the rules are not loaded: {first_context}"
@@ -92,7 +101,7 @@ async fn rules_and_skills_follow_cursor_injection_semantics() {
         "matching glob rule is attached for this turn only: {second_history}"
     );
     assert!(
-        !second_history.contains("ts skill"),
+        !second_history.contains("ts-only/SKILL.md"),
         "glob scoped skills stay out until a matching file shows up"
     );
     assert!(
@@ -106,7 +115,7 @@ async fn rules_and_skills_follow_cursor_injection_semantics() {
         "brace glob rules attach for a matching file: {third_history}"
     );
     assert!(
-        third_history.contains("web skill"),
+        third_history.contains("web-only/SKILL.md"),
         "brace glob skills attach for a matching file: {third_history}"
     );
     assert!(
