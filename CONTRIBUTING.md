@@ -198,8 +198,23 @@ and `StaleTarget` so callers know whether to retry against the next run.
 A goal continuation is a simulated user turn with its own message id, started by
 the run loop on `TurnCompleted` for an active goal in a root conversation.
 Paused or unavailable goals settle the turn without a model call
-(`skip_model`). After three continuations without a tool call the goal pauses
-itself, so an idle goal cannot spin.
+(`skip_model`). Goal edits, pause/resume, replacement, and clearing stay with
+Cursor: before continuing, the run reads the persisted composer goal back, but
+only once the cache has applied a checkpoint newer than the goal.
+
+| Goal status | Idle streak | Turn ends |
+| --- | --- | --- |
+| active | 0–2 | continue: counters and active time advance, next turn starts |
+| active | ≥3 | pause: status becomes paused, no model call, checkpoint updates |
+| active | any, tool call | idle streak resets, the next turn continues |
+| paused | any | stop |
+| complete | any | stop |
+| cleared | any | stop; the cleared status is persisted with the next checkpoint |
+
+There is no numeric continuation cap: a productive goal may run for hours or
+days. The loop ends when the goal is completed, paused, cleared, or when it
+keeps ending turns without tool activity. Clearing the goal is the user's
+cancel.
 
 ### Checkpoint and prefix stability
 

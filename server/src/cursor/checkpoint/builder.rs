@@ -1,6 +1,7 @@
 //! Coordinates construction of a complete Cursor checkpoint.
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
+use parking_lot::Mutex;
 use prost::Message;
 
 use crate::{
@@ -35,6 +36,10 @@ pub struct CheckpointBuilder {
     pub(super) roots: Option<RootFrontier>,
     pub(super) turn: Option<TurnFrontier>,
     pub(super) turns_initialized: bool,
+    /// Last state handed to the client. A goal continuation starts from here,
+    /// so it resumes the conversation head instead of the request that opened
+    /// the previous turn.
+    pub(super) published: Arc<Mutex<Option<pb::ConversationStateStructure>>>,
 }
 
 impl CheckpointBuilder {
@@ -44,6 +49,7 @@ impl CheckpointBuilder {
         parent_tool_call_id: Option<String>,
         base: Option<pb::ConversationStateStructure>,
         goal: GoalHandle,
+        published: Arc<Mutex<Option<pb::ConversationStateStructure>>>,
     ) -> Self {
         Self {
             store,
@@ -61,6 +67,7 @@ impl CheckpointBuilder {
             roots: None,
             turn: None,
             turns_initialized: false,
+            published,
         }
     }
 
@@ -286,6 +293,9 @@ impl CheckpointBuilder {
                 pb::agent_server_message::Message::ConversationCheckpointUpdate(checkpoint.clone()),
             ),
         });
+        if result.is_ok() {
+            *self.published.lock() = Some(checkpoint.clone());
+        }
         if let Some(trace) = handle.trace() {
             trace.artifact(
                 "checkpoint",

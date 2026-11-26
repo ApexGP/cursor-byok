@@ -13,11 +13,14 @@ pub const STATUS_PAUSED: i32 = pb::GoalStatus::Paused as i32;
 pub const STATUS_COMPLETE: i32 = pb::GoalStatus::Complete as i32;
 pub const STATUS_CLEARED: i32 = pb::GoalStatus::Cleared as i32;
 
-/// Durable goal state shared by checkpoint building, Tool execution, and the
-/// continuation action handler.
+/// Durable goal state shared by checkpoint building, Tool execution, the
+/// continuation action handler, and the Run loop that keeps a goal turn open.
 #[derive(Clone, Default)]
 pub struct GoalHandle {
     state: Arc<Mutex<Option<pb::GoalState>>>,
+    /// When this goal was created. Cursor's composer cache is only trusted for
+    /// goal mutations once it has applied a checkpoint newer than this.
+    created_at_ms: Arc<Mutex<Option<u64>>>,
 }
 
 impl std::fmt::Debug for GoalHandle {
@@ -44,11 +47,61 @@ impl GoalHandle {
     pub fn new(state: Option<pb::GoalState>) -> Self {
         Self {
             state: Arc::new(Mutex::new(state)),
+            created_at_ms: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn snapshot(&self) -> Option<pb::GoalState> {
         self.state.lock().clone()
+    }
+
+    /// Creation time of the goal currently held by this handle.
+    pub fn created_at_ms(&self) -> Option<u64> {
+        *self.created_at_ms.lock()
+    }
+
+    /// Applies the goal state Cursor persisted for this conversation. Cursor
+    /// owns the objective and the status (the user can edit, pause, resume, or
+    /// clear the goal while the turn is open); counters and active time stay
+    /// with our continuation accounting. A different `goal_id` replaces the
+    /// goal this turn was working on. Returns whether the goal is active.
+    pub fn adopt(&self, client: &pb::GoalState, now_ms: u64) -> bool {
+        let mut guard = self.state.lock();
+        let Some(current) = guard.as_mut() else {
+            return false;
+        };
+        if client.goal_id != current.goal_id {
+            let mut replacement = client.clone();
+            replacement.idle_continuations_without_tool_calls = 0;
+            replacement.continuation_count = 0;
+            replacement.active_duration_ms = Some(0);
+            replacement.last_accrued_at_ms =
+                (replacement.status == STATUS_ACTIVE).then_some(now_ms);
+            tracing::info!(
+                previous_goal_id = %current.goal_id,
+                goal_id = %replacement.goal_id,
+                "client replaced the goal; continuing with the new objective"
+            );
+            *guard = Some(replacement.clone());
+            return replacement.status == STATUS_ACTIVE;
+        }
+        if client.status != current.status {
+            if client.status == STATUS_ACTIVE {
+                start_accrual(current, now_ms);
+            } else {
+                stop_accrual(current, now_ms);
+            }
+            current.status = client.status;
+        }
+        if !client.objective.is_empty() && client.objective != current.objective {
+            current.objective = client.objective.clone();
+            current.idle_continuations_without_tool_calls = 0;
+            tracing::info!(
+                goal_id = %current.goal_id,
+                "goal objective changed; continuing with the new objective"
+            );
+        }
+        current.status == STATUS_ACTIVE
     }
 
     pub fn status_argument(value: &str) -> Option<i32> {
@@ -101,6 +154,7 @@ impl GoalHandle {
             agent_session_id: agent_session_id.map(str::to_string),
             context_tokens_added: None,
         };
+        *self.created_at_ms.lock() = Some(now_ms);
         *state = Some(goal.clone());
         goal
     }
@@ -167,6 +221,23 @@ impl GoalHandle {
         if state.status == STATUS_ACTIVE {
             state.idle_continuations_without_tool_calls = 0;
         }
+    }
+
+    /// Marks the goal cleared after Cursor removed it from its composer cache.
+    /// The cleared state is persisted with the next checkpoint, and
+    /// `begin_continuation` stops returning `Continue` because the goal is no
+    /// longer active.
+    pub fn clear(&self, now_ms: u64) -> bool {
+        let mut guard = self.state.lock();
+        let Some(state) = guard.as_mut() else {
+            return false;
+        };
+        if state.status == STATUS_CLEARED {
+            return false;
+        }
+        state.status = STATUS_CLEARED;
+        stop_accrual(state, now_ms);
+        true
     }
 }
 
@@ -304,6 +375,37 @@ mod tests {
     }
 
     #[test]
+    fn continuations_are_unbounded_while_tool_calls_arrive() {
+        let goal = created();
+        for round in 0..100 {
+            assert!(matches!(
+                goal.begin_continuation(CONVERSATION, None, 1_000 + round),
+                Continuation::Continue(_)
+            ));
+            goal.note_tool_call();
+        }
+        let state = goal.snapshot().unwrap();
+        assert_eq!(state.status, STATUS_ACTIVE);
+        assert_eq!(state.continuation_count, 100);
+        assert_eq!(state.idle_continuations_without_tool_calls, 0);
+    }
+
+    #[test]
+    fn clearing_the_goal_stops_continuation() {
+        let goal = created();
+        goal.begin_continuation(CONVERSATION, None, 1_500);
+        assert!(goal.clear(1_600));
+        let state = goal.snapshot().unwrap();
+        assert_eq!(state.status, STATUS_CLEARED);
+        assert_eq!(state.last_accrued_at_ms, None);
+        assert!(matches!(
+            goal.begin_continuation(CONVERSATION, None, 1_700),
+            Continuation::Unavailable
+        ));
+        assert!(!goal.clear(1_800), "clearing twice is a no-op");
+    }
+
+    #[test]
     fn three_idle_continuations_pause_the_goal() {
         let goal = created();
         for count in 1..=3 {
@@ -348,6 +450,69 @@ mod tests {
         assert_eq!(state.status, STATUS_ACTIVE);
         assert_eq!(state.active_duration_ms, Some(700));
         assert_eq!(state.last_accrued_at_ms, Some(2_000));
+    }
+
+    #[test]
+    fn adopting_a_client_edit_replaces_the_objective_and_clears_the_idle_streak() {
+        let goal = created();
+        goal.begin_continuation(CONVERSATION, None, 1_500);
+        let mut client = goal.snapshot().unwrap();
+        client.objective = "Ship the smaller feature".into();
+        assert!(goal.adopt(&client, 2_000));
+        let state = goal.snapshot().unwrap();
+        assert_eq!(state.objective, "Ship the smaller feature");
+        assert_eq!(state.idle_continuations_without_tool_calls, 0);
+        // Continuation accounting stays ours, not the client's.
+        assert_eq!(state.continuation_count, 1);
+    }
+
+    #[test]
+    fn adopting_a_paused_client_goal_stops_continuation() {
+        let goal = created();
+        let mut client = goal.snapshot().unwrap();
+        client.status = STATUS_PAUSED;
+        assert!(!goal.adopt(&client, 1_500));
+        let state = goal.snapshot().unwrap();
+        assert_eq!(state.status, STATUS_PAUSED);
+        assert_eq!(state.last_accrued_at_ms, None);
+        assert!(matches!(
+            goal.begin_continuation(CONVERSATION, None, 1_600),
+            Continuation::Unavailable
+        ));
+    }
+
+    #[test]
+    fn adopting_a_replacement_goal_resets_continuation_counters() {
+        let goal = created();
+        goal.begin_continuation(CONVERSATION, None, 1_500);
+        let mut client = goal.snapshot().unwrap();
+        client.goal_id = "replacement-goal".into();
+        client.objective = "Ship the new goal".into();
+        client.continuation_count = 7;
+        client.idle_continuations_without_tool_calls = 2;
+        client.active_duration_ms = Some(9_999);
+        assert!(goal.adopt(&client, 2_000));
+        let state = goal.snapshot().unwrap();
+        assert_eq!(state.goal_id, "replacement-goal");
+        assert_eq!(state.objective, "Ship the new goal");
+        assert_eq!(state.continuation_count, 0);
+        assert_eq!(state.idle_continuations_without_tool_calls, 0);
+        assert_eq!(state.active_duration_ms, Some(0));
+        assert_eq!(state.last_accrued_at_ms, Some(2_000));
+    }
+
+    #[test]
+    fn creation_time_is_recorded_for_new_goals_only() {
+        let goal = GoalHandle::default();
+        assert_eq!(goal.created_at_ms(), None);
+        goal.create(CONVERSATION, None, "Ship", "call-1", 1_000);
+        assert_eq!(goal.created_at_ms(), Some(1_000));
+        // Reusing the same CreateGoal call keeps the original creation time.
+        goal.create(CONVERSATION, None, "Ship", "call-1", 5_000);
+        assert_eq!(goal.created_at_ms(), Some(1_000));
+        // A different Tool call is a different goal.
+        goal.create(CONVERSATION, None, "Ship", "call-2", 9_000);
+        assert_eq!(goal.created_at_ms(), Some(9_000));
     }
 
     #[test]
