@@ -65,8 +65,8 @@ npm --prefix apps/desktop install
 `make check` is the minimum local gate. CI also runs checks that `make check`
 does not:
 
-- Linux: `cargo fmt`, `cargo clippy --workspace --all-targets -D warnings`,
-  `cargo test --workspace --all-targets`, and the frontend build.
+- Linux: `cargo fmt`, `cargo clippy --workspace --all-targets -D warnings`, and
+  `cargo test --workspace --all-targets`.
 - macOS and Windows: platform Clippy for the desktop crate and native SQLite
   storage tests.
 - Frontend job: release-note scripts, `support/diagnostics` parser tests, and

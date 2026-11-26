@@ -51,10 +51,10 @@ review.
 ### Credentials and local data
 
 Model API keys, custom headers, and application settings are stored in the local
-data directory (`~/.cursor-byok-v3/` on desktop, mode `0700` by default). Keys
-must not appear in logs, error messages, diagnostic bundles, issue bodies, crash
-reports, or test fixtures. Provider keys and Authorization headers are covered
-by the diagnostics redactor; do not bypass it.
+data directory (`~/.cursor-byok-v3/`, mode `0700` on Unix). Keys must not appear
+in logs, error messages, diagnostic bundles, issue bodies, crash reports, or
+test fixtures. Provider keys and Authorization headers are covered by the
+diagnostics redactor; do not bypass it.
 
 ### Cursor account and tokens
 
@@ -113,10 +113,10 @@ be uploaded or attached automatically.
 
 ### Updates and releases
 
-Updates are delivered through signed manifests. There are three manifest
-formats (Tauri `latest.json`, legacy `update.json`, and Windows portable
-`portable-latest.json`); mixing them can serve the wrong asset. Releases are
-owner-gated and must use the repository's release workflow. Do not add an
+Updates are delivered through release manifests. Tauri `latest.json` and the
+Windows portable manifest carry signatures; the legacy `update.json` carries
+SHA-256 checksums. Mixing the three formats can serve the wrong asset. Releases
+are owner-gated and must use the repository's release workflow. Do not add an
 unsigned or unpinned update path.
 
 ## Security review triggers
