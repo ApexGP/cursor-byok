@@ -212,14 +212,17 @@ server/
 │   │   ├── fetch.rs                            # ≈250 行；网页获取
 │   │   └── search_provider.rs                  # ≈240 行；搜索 Provider
 │   │
-│   └── local_app/                              # ≈1,000 行；本地运行环境
-│       ├── mod.rs                              # ≈100 行；local_app 入口（原Harness）
-│       ├── account.rs                          # ≈150 行；账号
-│       ├── proxy.rs                            # ≈250 行；代理
-│       ├── settings.rs                         # ≈200 行；设置
-│       └── ca/                                 # ≈300 行；证书
-│           ├── mod.rs                          # ≈250 行；CA 实现
-│           └── windows.rs                      # ≈50 行；Windows 支持
+│   └── local_app/                              # ≈3,170 行；本地运行环境
+│       ├── mod.rs                              # 638 行；local_app 入口（原Harness）
+│       ├── account.rs                          # 225 行；账号
+│       ├── composer_state.rs                   # 170 行；修复中断运行遗留的 composer 生成标记
+│       ├── model_cache.rs                      # 806 行；模型目录与 Statsig 缓存同步
+│       ├── process.rs                          # 602 行；Cursor 进程控制
+│       ├── proxy.rs                            # 298 行；代理
+│       ├── settings.rs                         # 148 行；设置
+│       └── ca/                                 # 281 行；证书
+│           ├── mod.rs                          # 214 行；CA 实现
+│           └── windows.rs                      # 67 行；Windows 支持
 │
 └── tests/                                      # ≈3,500 行；跨模块行为测试
     ├── conversation_delivery.rs                # ≈400 行；消息投递时序

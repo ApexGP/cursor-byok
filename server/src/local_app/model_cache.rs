@@ -55,6 +55,9 @@ pub async fn sync_with(store: &Store, service_url: Option<&str>) -> Result<Curso
     if !path.exists() {
         return Ok(CursorCatalogSync::default());
     }
+    if let Err(error) = super::composer_state::repair_interrupted_generations(&path).await {
+        tracing::warn!(%error, "failed to repair interrupted composer generations");
+    }
     let models = store.models().await?;
     sync_at_with_service(&path, &models, service_url).await
 }
