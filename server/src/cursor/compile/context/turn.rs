@@ -1,7 +1,7 @@
 //! Turn-scoped material: IDE files, selected context, and glob attachment.
 use crate::cursor::protocol::proto::agent::v1 as pb;
 
-use super::{globs, rules};
+use super::{globs, rules, skills};
 
 /// Workspace-relative paths available to this turn, used for glob attachment.
 #[derive(Debug, Default)]
@@ -164,7 +164,7 @@ pub(crate) fn attached_context(context: &pb::RequestContext, files: &TurnFiles) 
         .iter()
         .filter(|skill| !skill.disable_model_invocation && !skill.globs.is_empty())
         .filter(|skill| files.matches(&globs::normalize_globs(&skill.globs)))
-        .map(rules::skill_entry)
+        .map(skills::entry)
         .collect::<Vec<_>>();
     if !matched_skills.is_empty() {
         sections.push(format!(
@@ -437,10 +437,10 @@ mod tests {
             rust.contains("<user_rule>\nRUST BODY\n</user_rule>"),
             "{rust}"
         );
-        assert!(!rust.contains("ts skill"), "{rust}");
+        assert!(!rust.contains("scoped/SKILL.md"), "{rust}");
         let typescript =
             attached_context(&context, &TurnFiles::from_relative(&["app/web.ts"])).unwrap();
-        assert!(typescript.contains("ts skill"), "{typescript}");
+        assert!(typescript.contains("scoped/SKILL.md"), "{typescript}");
         assert!(!typescript.contains("RUST BODY"), "{typescript}");
     }
 
@@ -594,7 +594,10 @@ mod tests {
 
         let attached =
             attached_context(&context, &TurnFiles::from_relative(&["src/main.rs"])).unwrap();
-        assert!(attached.contains("tdd skill"), "{attached}");
+        assert!(
+            attached.contains("/repo/.agents/skills/tdd/SKILL.md"),
+            "{attached}"
+        );
         assert!(
             !attached.contains("<user_rule>"),
             "the skill entry is the single projection: {attached}"

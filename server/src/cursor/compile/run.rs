@@ -194,6 +194,7 @@ pub(crate) async fn prepare(
             "identity",
             &request_context,
             base_messages.as_deref().unwrap_or_default(),
+            model.context_window_tokens,
         )?
     } else {
         None
@@ -238,6 +239,7 @@ pub(crate) async fn prepare(
                     event_id,
                     &request_context,
                     base_messages.as_deref().unwrap_or_default(),
+                    model.context_window_tokens,
                 )?,
             }
         }

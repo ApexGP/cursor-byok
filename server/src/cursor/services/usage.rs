@@ -78,8 +78,8 @@ pub(crate) fn breakdown(
     }
 
     let mut estimates = [0_u64; 8];
-    for index in 0..CONVERSATION {
-        estimates[index] = measures[index].estimated_tokens();
+    for (index, estimate) in estimates.iter_mut().enumerate() {
+        *estimate = measures[index].estimated_tokens();
     }
     if measures[SUMMARY].characters != 0 {
         estimates[SUMMARY] = measures[SUMMARY].estimated_tokens();
@@ -93,10 +93,7 @@ pub(crate) fn breakdown(
         estimates[SUMMARY] = summary.estimated_tokens as u64;
     }
     let easter_egg_tokens = 1_u64;
-    let categorized_tokens = used_tokens as u64;
-    fit_special_estimates(&mut estimates, categorized_tokens);
-    estimates[CONVERSATION] =
-        categorized_tokens.saturating_sub(estimates[..CONVERSATION].iter().sum::<u64>());
+    fit_estimates(&mut estimates, used_tokens as u64);
 
     let mut categories = CATEGORIES
         .iter()
@@ -200,22 +197,36 @@ fn collect_ranges(text: &str, tag: &str, category: usize, output: &mut Vec<(usiz
     }
 }
 
-fn fit_special_estimates(estimates: &mut [u64; 8], total: u64) {
-    let special_total = estimates[..CONVERSATION].iter().sum::<u64>();
-    if special_total <= total || special_total == 0 {
+/// Fits the measured category estimates to the token count the provider
+/// charged.
+///
+/// The character-based estimate runs behind provider tokenizers on CJK and
+/// XML-heavy context, so the measured total is usually below `used_tokens`.
+/// Scaling every category keeps that shortfall spread over the sections that
+/// produced it; charging it to the conversation would report tens of thousands
+/// of conversation tokens for a first turn whose visible messages are tiny.
+fn fit_estimates(estimates: &mut [u64; 8], total: u64) {
+    let measured = estimates.iter().copied().sum::<u64>();
+    if measured == 0 {
+        estimates[CONVERSATION] = total;
         return;
     }
-    let original = *estimates;
-    let mut assigned = 0;
-    for index in 0..CONVERSATION {
-        estimates[index] = original[index].saturating_mul(total) / special_total;
-        assigned += estimates[index];
+    if measured == total {
+        return;
     }
-    let mut remainder = total - assigned;
-    let mut order = (0..CONVERSATION).collect::<Vec<_>>();
+    let scaled = estimates
+        .iter()
+        .map(|estimate| (u128::from(*estimate) * u128::from(total) / u128::from(measured)) as u64)
+        .collect::<Vec<u64>>();
+    let assigned = scaled.iter().copied().sum::<u64>();
+    let mut remainder = total.saturating_sub(assigned);
+    let mut order = (0..estimates.len()).collect::<Vec<usize>>();
     order.sort_by_key(|index| {
-        std::cmp::Reverse(original[*index].saturating_mul(total) % special_total)
+        std::cmp::Reverse(
+            (u128::from(estimates[*index]) * u128::from(total) % u128::from(measured)) as u64,
+        )
     });
+    *estimates = scaled.try_into().expect("one estimate per category");
     for index in order {
         if remainder == 0 {
             break;
@@ -291,10 +302,46 @@ mod tests {
         assert!(tokens(&snapshot, "subagents") > 0);
         assert!(tokens(&snapshot, "mcp") > 0);
 
-        let special = (0..CONVERSATION)
-            .map(|index| tokens(&snapshot, CATEGORIES[index].0))
+        let total = CATEGORIES
+            .iter()
+            .map(|(id, _)| tokens(&snapshot, id))
             .sum::<u32>();
-        assert_eq!(tokens(&snapshot, "conversation"), 20_000 - special);
+        assert_eq!(total, 20_000, "categories add up to the provider count");
+        assert!(
+            tokens(&snapshot, "conversation") < tokens(&snapshot, "skills"),
+            "the tiny environment block must not absorb the provider overhead"
+        );
+    }
+
+    #[test]
+    fn a_large_catalog_does_not_turn_into_conversation_tokens() {
+        let catalog = "<agent_skill fullPath=\"/s/SKILL.md\">描述</agent_skill>".repeat(200);
+        let text = format!("{ENV}\n\n<agent_skills>\n<available_skills>\n{catalog}\n</available_skills>\n</agent_skills>");
+        let message =
+            CanonicalMessage::text("request-context:test", Role::User, Origin::Prompt, text);
+        let user = CanonicalMessage::text("user", Role::User, Origin::User, "question");
+
+        let snapshot = breakdown(
+            60_000,
+            500_000,
+            None,
+            "",
+            &[],
+            &HashSet::new(),
+            &[message, user],
+        )
+        .unwrap();
+
+        assert!(
+            tokens(&snapshot, "conversation") < 1_000,
+            "only the visible messages belong to the conversation"
+        );
+        assert!(tokens(&snapshot, "skills") > 50_000);
+        let total = CATEGORIES
+            .iter()
+            .map(|(id, _)| tokens(&snapshot, id))
+            .sum::<u32>();
+        assert_eq!(total, 60_000);
     }
 
     #[test]

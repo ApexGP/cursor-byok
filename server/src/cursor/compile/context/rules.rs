@@ -149,14 +149,6 @@ pub(super) fn push_rule_content(rules: &mut Vec<String>, rule: &pb::CursorRule) 
     }
 }
 
-pub(super) fn skill_entry(skill: &pb::AgentSkill) -> String {
-    format!(
-        "<agent_skill fullPath=\"{}\">{}</agent_skill>",
-        super::xml(&skill.full_path),
-        super::xml(&skill.description),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::testing::{frontmatter_rule, rule, typed_rule};

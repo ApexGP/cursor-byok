@@ -233,6 +233,7 @@ pub(super) fn compile_request_context(
     event_id: &str,
     request_context: &pb::RequestContext,
     history: &[CanonicalMessage],
+    context_window_tokens: Option<u64>,
 ) -> Result<Option<CanonicalMessage>> {
     let time = Time::now(
         request_context
@@ -240,7 +241,7 @@ pub(super) fn compile_request_context(
             .as_ref()
             .map(|env| env.time_zone.as_str()),
     )?;
-    let text = context::compile_context(request_context, &time.today);
+    let text = context::compile_context(request_context, &time.today, context_window_tokens);
     if text.is_empty() {
         return Ok(None);
     }
