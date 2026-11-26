@@ -158,3 +158,48 @@ mod tests {
         assert!(!model.reasoning.enabled);
     }
 }
+
+#[cfg(test)]
+mod subagent_variant_tests {
+    use super::*;
+    use crate::model::{ModelLatency, SubagentModelOverride};
+
+    fn parameter(id: &str, value: &str) -> pb::requested_model::ModelParameterValue {
+        pb::requested_model::ModelParameterValue {
+            id: id.into(),
+            value: value.into(),
+        }
+    }
+
+    #[test]
+    fn parses_explicit_subagent_context_effort_and_fast_mode() {
+        let request = pb::AgentRunRequest {
+            subagent_model_overrides: vec![pb::SubagentModelOverride {
+                subagent_type: "generalPurpose".into(),
+                selection: Some(pb::subagent_model_override::Selection::Model(
+                    pb::RequestedModel {
+                        model_id: "model-hash".into(),
+                        parameters: vec![
+                            parameter("context", "1000000"),
+                            parameter("effort", "max"),
+                            parameter("fast", "true"),
+                        ],
+                        ..Default::default()
+                    },
+                )),
+            }],
+            ..Default::default()
+        };
+
+        let overrides = overrides(&request).expect("subagent override");
+        assert_eq!(overrides.len(), 1);
+        let SubagentModelOverride::Explicit(spec) = &overrides[0].1 else {
+            panic!("expected explicit subagent model");
+        };
+        assert_eq!(spec.model_id, "model-hash");
+        assert_eq!(spec.context_window_tokens, Some(1_000_000));
+        assert_eq!(spec.reasoning.effort.as_deref(), Some("max"));
+        assert!(spec.reasoning.enabled);
+        assert_eq!(spec.latency, ModelLatency::Fast);
+    }
+}

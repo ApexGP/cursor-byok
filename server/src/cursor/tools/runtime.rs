@@ -10,11 +10,13 @@ use std::{
 use tokio::sync::Mutex;
 
 use crate::{
-    cursor::goal::GoalHandle, cursor::protocol::proto::agent::v1 as pb, model::ToolCall, Error,
-    Result,
+    cursor::goal::GoalHandle,
+    cursor::protocol::proto::agent::v1 as pb,
+    model::{ModelSpec, ToolCall},
+    Error, Result,
 };
 
-use super::edit::EditWrite;
+use super::{edit::EditWrite, subagent_models::SubagentModelRegistry};
 
 #[derive(Clone, Default)]
 pub struct CursorToolRuntime {
@@ -47,6 +49,7 @@ pub struct ExecContext {
     pub root_conversation_id: String,
     pub default_subagent_model: String,
     pub subagent_model: Option<SubagentModel>,
+    pub subagent_models: SubagentModelRegistry,
     pub allow_subagents: bool,
     pub subagents_disabled: bool,
     pub terminals_folder: String,
@@ -66,7 +69,7 @@ pub struct McpRoute {
 
 #[derive(Clone, Debug)]
 pub enum SubagentModel {
-    Model(String),
+    Model(ModelSpec),
     Disabled,
 }
 
@@ -94,7 +97,7 @@ impl ExecContext {
             return Ok(call.clone());
         }
         let model = match &self.subagent_model {
-            Some(SubagentModel::Model(model)) => model.clone(),
+            Some(SubagentModel::Model(model)) => model.model_id.clone(),
             Some(SubagentModel::Disabled) => unreachable!("disabled Task returned above"),
             None => arguments
                 .get("model")
@@ -114,6 +117,13 @@ impl ExecContext {
             .as_object_mut()
             .expect("Task arguments were validated")
             .insert("model".into(), serde_json::Value::String(model));
+        if let Some(SubagentModel::Model(selection)) = &self.subagent_model {
+            // The client only receives the model string; keep the selected
+            // context/effort/fast variant for the child run keyed by this Task
+            // call id. Without this the child falls back to saved defaults.
+            self.subagent_models
+                .remember(&call.call_id, selection.clone());
+        }
         Ok(prepared)
     }
 }
@@ -369,4 +379,67 @@ pub(crate) fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod subagent_model_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::model::ModelLatency;
+
+    fn context(subagent_model: Option<SubagentModel>) -> ExecContext {
+        ExecContext {
+            conversation_id: "conversation".into(),
+            root_conversation_id: "conversation".into(),
+            default_subagent_model: "parent-model".into(),
+            subagent_model,
+            subagent_models: Default::default(),
+            allow_subagents: true,
+            subagents_disabled: false,
+            terminals_folder: String::new(),
+            admin_command_denylist: Vec::new(),
+            mcp_routes: HashMap::new(),
+            agent_session_id: None,
+            goal: Default::default(),
+        }
+    }
+
+    fn task_call() -> ToolCall {
+        ToolCall {
+            index: 0,
+            call_id: "call-1".into(),
+            model_call_id: "model-call".into(),
+            name: "Task".into(),
+            arguments_text: String::new(),
+            arguments: serde_json::json!({
+                "prompt": "do work",
+                "description": "work",
+                "subagent_type": "generalPurpose",
+            }),
+            argument_error: None,
+        }
+    }
+
+    #[test]
+    fn task_call_remembers_the_selected_variant_for_the_child() {
+        let mut selection = ModelSpec::new("model-hash");
+        selection.context_window_tokens = Some(1_000_000);
+        selection.reasoning.effort = Some("max".into());
+        selection.reasoning.enabled = true;
+        selection.latency = ModelLatency::Fast;
+        let context = context(Some(SubagentModel::Model(selection)));
+        let call = task_call();
+
+        let prepared = context.prepare_call(&call).expect("prepare Task");
+
+        assert_eq!(prepared.arguments["model"], "model-hash");
+        let remembered = context
+            .subagent_models
+            .get("call-1")
+            .expect("variant registered for the child");
+        assert_eq!(remembered.context_window_tokens, Some(1_000_000));
+        assert_eq!(remembered.reasoning.effort.as_deref(), Some("max"));
+        assert_eq!(remembered.latency, ModelLatency::Fast);
+    }
 }

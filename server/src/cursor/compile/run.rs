@@ -12,11 +12,14 @@ use crate::{
         protocol::proto::agent::v1 as pb,
         services::blob_sync::BlobSynchronizer,
         services::context_sync::RequestContextSynchronizer,
-        tools::runtime::{ExecContext, SubagentModel},
+        tools::{
+            runtime::{ExecContext, SubagentModel},
+            subagent_models::SubagentModelRegistry,
+        },
     },
     model::{
-        CanonicalMessage, ContentPart, ConversationId, MessageContent, Origin, PreparedRun,
-        PromptSpec, Role, RunAction, RunId, RunKind,
+        CanonicalMessage, ContentPart, ConversationId, MessageContent, ModelLatency, ModelSpec,
+        Origin, PreparedRun, PromptSpec, Role, RunAction, RunId, RunKind,
     },
     store::{BlobId, Store},
     Error, Result,
@@ -54,6 +57,9 @@ pub(crate) struct PrepareDependencies<'a> {
     pub blob_sync: &'a BlobSynchronizer,
     pub context_sync: &'a RequestContextSynchronizer,
     pub local_rules_dir: Option<&'a std::path::Path>,
+    pub subagent_models: &'a SubagentModelRegistry,
+    /// Parent-selected variant for this run, looked up by parent tool call id.
+    pub subagent_model: Option<&'a ModelSpec>,
 }
 
 pub(crate) async fn prepare(
@@ -68,6 +74,8 @@ pub(crate) async fn prepare(
         blob_sync,
         context_sync,
         local_rules_dir,
+        subagent_models,
+        subagent_model,
     } = dependencies;
     checkpoint
         .import_prefetched(&request.pre_fetched_blobs)
@@ -144,6 +152,11 @@ pub(crate) async fn prepare(
     let mut model = model::requested_model(request)?;
     if let Some(configured_model) = store.model(&model.model_id).await? {
         configured_model.configure(&mut model);
+    }
+    if let Some(selection) = subagent_model {
+        // `configure` filled saved defaults; the parent's Task selection is
+        // more specific and must win for the child run.
+        apply_subagent_model(&mut model, selection);
     }
     let dynamic = context::dynamic_mcp(request, &request_context)?;
     let subagent_model_overrides = model::overrides(request)?;
@@ -365,7 +378,8 @@ pub(crate) async fn prepare(
         request,
         &request_context,
         &conversation_id,
-        &model.model_id,
+        &model,
+        subagent_models.clone(),
         subagents_disabled,
         &subagent_model_overrides,
         checkpoint.goal().clone(),
@@ -618,11 +632,13 @@ pub(super) fn mode_from_proto(mode: i32) -> Result<Mode> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exec_context(
     request: &pb::AgentRunRequest,
     request_context: &pb::RequestContext,
     conversation_id: &ConversationId,
-    model_id: &str,
+    model: &ModelSpec,
+    subagent_models: SubagentModelRegistry,
     subagents_disabled: bool,
     overrides: &[(
         crate::model::SubagentKind,
@@ -631,10 +647,8 @@ fn exec_context(
     goal: GoalHandle,
 ) -> ExecContext {
     let subagent_model = overrides.first().map(|(_, value)| match value {
-        crate::model::SubagentModelOverride::Explicit(model) => {
-            SubagentModel::Model(model.model_id.clone())
-        }
-        crate::model::SubagentModelOverride::Inherit => SubagentModel::Model(model_id.into()),
+        crate::model::SubagentModelOverride::Explicit(model) => SubagentModel::Model(model.clone()),
+        crate::model::SubagentModelOverride::Inherit => SubagentModel::Model(model.clone()),
         crate::model::SubagentModelOverride::Disabled => SubagentModel::Disabled,
     });
     ExecContext {
@@ -643,8 +657,9 @@ fn exec_context(
             .conversation_group_id
             .clone()
             .unwrap_or_else(|| conversation_id.to_string()),
-        default_subagent_model: model_id.into(),
+        default_subagent_model: model.model_id.clone(),
         subagent_model,
+        subagent_models,
         allow_subagents: request.subagent_type_name.is_none() && !subagents_disabled,
         subagents_disabled,
         terminals_folder: request_context
@@ -667,4 +682,117 @@ fn is_goal_continuation(request: &pb::AgentRunRequest) -> bool {
             .and_then(|action| action.action.as_ref()),
         Some(pb::conversation_action::Action::GoalContinuationAction(_))
     )
+}
+fn apply_subagent_model(model: &mut ModelSpec, selection: &ModelSpec) {
+    if selection.model_id != model.model_id {
+        tracing::debug!(
+            child_model = %model.model_id,
+            parent_model = %selection.model_id,
+            "subagent variant targets a different model; not applying it"
+        );
+        return;
+    }
+    tracing::info!(
+        model_id = %model.model_id,
+        context_window_tokens = ?selection.context_window_tokens,
+        reasoning_effort = ?selection.reasoning.effort,
+        fast = selection.latency == ModelLatency::Fast,
+        "applied parent subagent model variant"
+    );
+    if selection.context_window_tokens.is_some() {
+        model.context_window_tokens = selection.context_window_tokens;
+    }
+    if selection.reasoning.effort.is_some() {
+        model.reasoning.effort = selection.reasoning.effort.clone();
+        model.reasoning.enabled = true;
+    } else if selection.reasoning.enabled {
+        model.reasoning.enabled = true;
+    }
+    if selection.latency == ModelLatency::Fast {
+        model.latency = ModelLatency::Fast;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ReasoningSpec;
+
+    fn selection(
+        model_id: &str,
+        context_window_tokens: Option<u64>,
+        effort: Option<&str>,
+        latency: ModelLatency,
+    ) -> ModelSpec {
+        ModelSpec {
+            model_id: model_id.into(),
+            display_name: None,
+            reasoning: ReasoningSpec {
+                enabled: effort.is_some(),
+                effort: effort.map(str::to_string),
+            },
+            latency,
+            max_output_tokens: None,
+            context_window_tokens,
+            supports_image_generation: false,
+            extra_params: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn parent_selection_overrides_configured_child_defaults() {
+        let mut child = selection(
+            "model-hash",
+            Some(256_000),
+            Some("high"),
+            ModelLatency::Standard,
+        );
+        let parent = selection(
+            "model-hash",
+            Some(1_000_000),
+            Some("max"),
+            ModelLatency::Fast,
+        );
+
+        apply_subagent_model(&mut child, &parent);
+
+        assert_eq!(child.context_window_tokens, Some(1_000_000));
+        assert_eq!(child.reasoning.effort.as_deref(), Some("max"));
+        assert!(child.reasoning.enabled);
+        assert_eq!(child.latency, ModelLatency::Fast);
+    }
+
+    #[test]
+    fn selection_for_a_different_model_is_ignored() {
+        let mut child = selection(
+            "model-a",
+            Some(256_000),
+            Some("high"),
+            ModelLatency::Standard,
+        );
+        let parent = selection("model-b", Some(1_000_000), Some("max"), ModelLatency::Fast);
+
+        apply_subagent_model(&mut child, &parent);
+
+        assert_eq!(child.model_id, "model-a");
+        assert_eq!(child.context_window_tokens, Some(256_000));
+        assert_eq!(child.reasoning.effort.as_deref(), Some("high"));
+        assert_eq!(child.latency, ModelLatency::Standard);
+    }
+
+    #[test]
+    fn unspecified_parent_fields_do_not_clear_child_defaults() {
+        let mut child = selection(
+            "model-hash",
+            Some(256_000),
+            Some("high"),
+            ModelLatency::Standard,
+        );
+        let parent = selection("model-hash", None, None, ModelLatency::Standard);
+
+        apply_subagent_model(&mut child, &parent);
+
+        assert_eq!(child.context_window_tokens, Some(256_000));
+        assert_eq!(child.reasoning.effort.as_deref(), Some("high"));
+    }
 }

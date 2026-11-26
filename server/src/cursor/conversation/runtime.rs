@@ -624,6 +624,35 @@ async fn start_generation(
     );
 }
 
+fn fill_missing_user_message_id(request: &mut pb::AgentRunRequest, request_id: &str) {
+    // A transport can carry several follow-up actions. Prefer the per-run id
+    // so two empty message ids on one transport cannot collapse into one.
+    let identity = request
+        .run_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .unwrap_or(request_id)
+        .to_string();
+    let Some(pb::conversation_action::Action::UserMessageAction(action)) = request
+        .action
+        .as_mut()
+        .and_then(|action| action.action.as_mut())
+    else {
+        return;
+    };
+    let Some(user) = action.user_message.as_mut() else {
+        return;
+    };
+    if user.message_id.is_empty() {
+        user.message_id = format!("byok-subagent:{identity}");
+        tracing::warn!(
+            request_id,
+            %identity,
+            "Cursor user message has no message_id; synthesized one"
+        );
+    }
+}
+
 fn finish_pending(
     handle: &TransportHandle,
     current: &Option<RunGeneration>,
@@ -677,6 +706,8 @@ fn spawn_run_request(
         if generation.superseded.is_cancelled() {
             return;
         }
+        let mut request = request;
+        fill_missing_user_message_id(&mut request, handle.request_id());
 
         let mut checkpoint = CheckpointBuilder::new(
             dependencies.store.clone(),
@@ -685,6 +716,9 @@ fn spawn_run_request(
             request.conversation_state.clone(),
             generation.goal.clone(),
         );
+        let subagent_model = handle
+            .parent()
+            .and_then(|parent| dependencies.subagent_models.get(&parent.tool_call_id));
         let prepared = tokio::select! {
             biased;
             _ = generation.superseded.cancelled() => return,
@@ -698,6 +732,8 @@ fn spawn_run_request(
                     blob_sync: &blob_sync,
                     context_sync: &context_sync,
                     local_rules_dir: dependencies.local_rules_dir.as_deref(),
+                    subagent_models: &dependencies.subagent_models,
+                    subagent_model: subagent_model.as_ref(),
                 },
             ) => prepared,
         };
@@ -941,5 +977,66 @@ fn runtime_action_name(action: &pb::conversation_action::Action) -> &'static str
         Action::SubscriptionNotificationAction(_) => "SubscriptionNotificationAction",
         Action::GoalContinuationAction(_) => "GoalContinuationAction",
         Action::InjectContextAction(_) => "InjectContextAction",
+    }
+}
+
+#[cfg(test)]
+mod user_message_id_tests {
+    use super::*;
+
+    fn request(message_id: &str) -> pb::AgentRunRequest {
+        pb::AgentRunRequest {
+            action: Some(pb::ConversationAction {
+                action: Some(pb::conversation_action::Action::UserMessageAction(
+                    pb::UserMessageAction {
+                        user_message: Some(pb::UserMessage {
+                            message_id: message_id.into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn message_id(request: &pb::AgentRunRequest) -> &str {
+        let Some(pb::conversation_action::Action::UserMessageAction(action)) = request
+            .action
+            .as_ref()
+            .and_then(|action| action.action.as_ref())
+        else {
+            panic!("expected user message action");
+        };
+        action
+            .user_message
+            .as_ref()
+            .expect("user message")
+            .message_id
+            .as_str()
+    }
+
+    #[test]
+    fn synthesizes_a_missing_user_message_id_for_subagent_runs() {
+        let mut request = request("");
+        fill_missing_user_message_id(&mut request, "request-1");
+        assert_eq!(message_id(&request), "byok-subagent:request-1");
+    }
+
+    #[test]
+    fn prefers_the_run_id_for_follow_up_actions() {
+        let mut request = request("");
+        request.run_id = Some("run-1".into());
+        fill_missing_user_message_id(&mut request, "request-1");
+        assert_eq!(message_id(&request), "byok-subagent:run-1");
+    }
+
+    #[test]
+    fn preserves_an_existing_user_message_id() {
+        let mut request = request("client-message");
+        fill_missing_user_message_id(&mut request, "request-1");
+        assert_eq!(message_id(&request), "client-message");
     }
 }

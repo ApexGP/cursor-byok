@@ -21,10 +21,7 @@ pub(crate) fn create(call: &ToolCall, context: &ExecContext) -> Result<ToolCompl
         .map(str::trim)
         .filter(|objective| !objective.is_empty());
     let Some(objective) = objective else {
-        return Ok(failure(
-            call,
-            "CreateGoal objective must be a non-empty string",
-        )?);
+        return failure(call, "CreateGoal objective must be a non-empty string");
     };
     let state = context.goal.create(
         &context.conversation_id,
@@ -67,14 +64,11 @@ pub(crate) fn update(call: &ToolCall, context: &ExecContext) -> Result<ToolCompl
         .and_then(Value::as_str)
         .and_then(GoalHandle::status_argument);
     let Some(status) = status else {
-        return Ok(failure(
-            call,
-            "UpdateGoal status must be \"active\" or \"complete\"",
-        )?);
+        return failure(call, "UpdateGoal status must be \"active\" or \"complete\"");
     };
     let state = match context.goal.update_status(status, now_ms()) {
         Ok(state) => state,
-        Err(error) => return Ok(failure(call, &error)?),
+        Err(error) => return failure(call, &error),
     };
     let mut rendered = codec::render_tool_call(call, false)?;
     let Some(pb::tool_call::Tool::UpdateGoalToolCall(tool)) = rendered.tool.as_mut() else {

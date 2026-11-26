@@ -5,7 +5,10 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc, Mutex, Notify};
 
 use crate::{
-    cursor::{prompting::PromptCompiler, transport::TransportHandle},
+    cursor::{
+        prompting::PromptCompiler, tools::subagent_models::SubagentModelRegistry,
+        transport::TransportHandle,
+    },
     model::{ConversationId, RunId},
     provider::Provider,
     run::{CommandResult, RunHandle},
@@ -28,6 +31,8 @@ pub(crate) struct ConversationDependencies {
     pub web_cache: WebCache,
     /// 本地 rules 服务的 md 存储目录;编译请求上下文时合并其中的规则。
     pub local_rules_dir: Option<std::path::PathBuf>,
+    /// Task call id -> parent-selected subagent model variant.
+    pub subagent_models: SubagentModelRegistry,
 }
 
 struct RegistryInner {
@@ -62,6 +67,7 @@ impl ConversationRegistry {
                     compiler,
                     web_cache,
                     local_rules_dir,
+                    subagent_models: SubagentModelRegistry::default(),
                 },
             }),
         }

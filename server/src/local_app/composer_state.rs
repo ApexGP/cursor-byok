@@ -33,10 +33,11 @@ pub(super) async fn repair_interrupted_generations(path: &Path) -> Result<usize>
     if composer_table.is_none() {
         return Ok(0);
     }
-    let rows = sqlx::query("SELECT key, CAST(value AS TEXT) AS value FROM cursorDiskKV WHERE key LIKE ?")
-        .bind(format!("{COMPOSER_PREFIX}%"))
-        .fetch_all(&mut connection)
-        .await?;
+    let rows =
+        sqlx::query("SELECT key, CAST(value AS TEXT) AS value FROM cursorDiskKV WHERE key LIKE ?")
+            .bind(format!("{COMPOSER_PREFIX}%"))
+            .fetch_all(&mut connection)
+            .await?;
     let mut repaired = 0;
     for row in rows {
         let key: String = row.try_get("key")?;
@@ -91,12 +92,10 @@ mod tests {
 
     async fn seed(path: &Path, composers: &[(&str, Value)]) {
         let mut connection = connect(path).await;
-        sqlx::query(
-            "CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
-        )
-        .execute(&mut connection)
-        .await
-        .unwrap();
+        sqlx::query("CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
         for (key, composer) in composers {
             sqlx::query("INSERT INTO cursorDiskKV(key, value) VALUES(?, ?)")
                 .bind(key)
@@ -109,11 +108,12 @@ mod tests {
 
     async fn read(path: &Path, key: &str) -> Value {
         let mut connection = connect(path).await;
-        let text: String = sqlx::query_scalar("SELECT CAST(value AS TEXT) FROM cursorDiskKV WHERE key = ?")
-            .bind(key)
-            .fetch_one(&mut connection)
-            .await
-            .unwrap();
+        let text: String =
+            sqlx::query_scalar("SELECT CAST(value AS TEXT) FROM cursorDiskKV WHERE key = ?")
+                .bind(key)
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
         serde_json::from_str(&text).unwrap()
     }
 
@@ -144,7 +144,10 @@ mod tests {
                         "conversationActionManager": {"generationUUID": "run-4"}
                     }),
                 ),
-                ("composerData:clean", serde_json::json!({"status": "completed"})),
+                (
+                    "composerData:clean",
+                    serde_json::json!({"status": "completed"}),
+                ),
             ],
         )
         .await;
