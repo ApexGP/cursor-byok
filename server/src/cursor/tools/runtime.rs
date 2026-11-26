@@ -9,7 +9,10 @@ use std::{
 
 use tokio::sync::Mutex;
 
-use crate::{cursor::protocol::proto::agent::v1 as pb, model::ToolCall, Error, Result};
+use crate::{
+    cursor::goal::GoalHandle, cursor::protocol::proto::agent::v1 as pb, model::ToolCall, Error,
+    Result,
+};
 
 use super::edit::EditWrite;
 
@@ -49,6 +52,8 @@ pub struct ExecContext {
     pub terminals_folder: String,
     pub admin_command_denylist: Vec<String>,
     pub mcp_routes: HashMap<(String, String), McpRoute>,
+    pub agent_session_id: Option<String>,
+    pub goal: GoalHandle,
 }
 
 #[derive(Clone, Debug)]

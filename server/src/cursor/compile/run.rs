@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::{
+    cursor::goal::{self, Continuation, GoalHandle},
     cursor::prompting::{Mode, PromptCompiler},
     cursor::{
         checkpoint::messages,
@@ -43,6 +44,7 @@ pub struct CursorRunContext {
     pub checkpoint_prompt: PromptSpec,
     pub compacting: bool,
     pub background_completion: bool,
+    pub skip_model: bool,
 }
 
 pub(crate) struct PrepareDependencies<'a> {
@@ -130,7 +132,7 @@ pub(crate) async fn prepare(
         action_context,
         mut event_id,
         input_id,
-        starts_turn,
+        mut starts_turn,
         compacting,
         background_completion,
     } = action(request)?;
@@ -170,6 +172,40 @@ pub(crate) async fn prepare(
     } else {
         checkpoint_prompt.clone()
     };
+    let mut skip_model = false;
+    if is_goal_continuation(request) {
+        let todo_tool = checkpoint_prompt
+            .tools
+            .iter()
+            .find(|tool| tool.name == "TodoWrite")
+            .map(|tool| tool.name.as_str());
+        let update_tool = checkpoint_prompt
+            .tools
+            .iter()
+            .find(|tool| tool.name == "UpdateGoal")
+            .map(|tool| tool.name.as_str());
+        match checkpoint.goal().begin_continuation(
+            conversation_id.as_str(),
+            request.agent_session_id.as_deref(),
+            crate::cursor::tools::runtime::now_ms(),
+        ) {
+            Continuation::Continue(state) => {
+                let message_id = Uuid::new_v4().to_string();
+                let text = goal::continuation::prompt(&state, todo_tool, update_tool);
+                turn_user = Some(pb::UserMessage {
+                    text,
+                    message_id: message_id.clone(),
+                    mode: mode_number,
+                    is_simulated_msg: Some(true),
+                    simulated_msg_reason: Some(pb::SimulatedMsgReason::GoalContinuation as i32),
+                    ..Default::default()
+                });
+                event_id = Some(message_id);
+                starts_turn = true;
+            }
+            Continuation::Paused | Continuation::Unavailable => skip_model = true,
+        }
+    }
     let proposed_base_checkpoint_id = match base_messages.as_mut() {
         Some(messages) if !messages.is_empty() => {
             validate_prompt_root(messages)?;
@@ -332,6 +368,7 @@ pub(crate) async fn prepare(
         &model.model_id,
         subagents_disabled,
         &subagent_model_overrides,
+        checkpoint.goal().clone(),
     );
     Ok((
         PreparedRun {
@@ -357,6 +394,7 @@ pub(crate) async fn prepare(
             checkpoint_prompt,
             compacting,
             background_completion,
+            skip_model,
         },
     ))
 }
@@ -590,6 +628,7 @@ fn exec_context(
         crate::model::SubagentKind,
         crate::model::SubagentModelOverride,
     )],
+    goal: GoalHandle,
 ) -> ExecContext {
     let subagent_model = overrides.first().map(|(_, value)| match value {
         crate::model::SubagentModelOverride::Explicit(model) => {
@@ -615,5 +654,17 @@ fn exec_context(
             .unwrap_or_default(),
         admin_command_denylist: request_context.admin_command_denylist.clone(),
         mcp_routes: context::meta_mcp_routes(request_context),
+        agent_session_id: request.agent_session_id.clone(),
+        goal,
     }
+}
+
+fn is_goal_continuation(request: &pb::AgentRunRequest) -> bool {
+    matches!(
+        request
+            .action
+            .as_ref()
+            .and_then(|action| action.action.as_ref()),
+        Some(pb::conversation_action::Action::GoalContinuationAction(_))
+    )
 }

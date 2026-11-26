@@ -31,6 +31,12 @@ const MCP_META_SLIM_GATE: &str = "mcp_meta_tool_slim_descriptors";
 /// Statsig returns false for gates missing from the bootstrap payload instead
 /// of falling back to Cursor's compiled default; keep JSON schema transport on.
 const MCP_INPUT_SCHEMA_JSON_GATE: &str = "mcp_input_schema_json";
+/// Goal continuation is scheduled by the workbench itself, so its gate must be
+/// on for the client to dispatch `GoalContinuationAction` while idle.
+const AGENT_GOAL_CONTINUATION_GATE: &str = "agent_goal_continuation";
+/// The local agent Tool generator only exposes CreateGoal/UpdateGoal when this
+/// feature flag is on.
+const ENABLE_GOAL_TOOLS_GATE: &str = "enableGoalTools";
 const LOCAL_RULE: &str = "local_enabled";
 const LEGACY_LOCAL_USER_ID: &str = "local_ultra";
 
@@ -195,6 +201,8 @@ pub(crate) fn patch_statsig_gates(config: &mut Value) -> Result<()> {
     let meta_mcp_key = statsig_key(config, META_MCP_TOOL_GATE);
     let meta_slim_key = statsig_key(config, MCP_META_SLIM_GATE);
     let input_schema_json_key = statsig_key(config, MCP_INPUT_SCHEMA_JSON_GATE);
+    let goal_continuation_key = statsig_key(config, AGENT_GOAL_CONTINUATION_GATE);
+    let goal_tools_key = statsig_key(config, ENABLE_GOAL_TOOLS_GATE);
     let now = chrono::Utc::now().timestamp_millis() as u64;
     let root = config
         .as_object_mut()
@@ -220,6 +228,11 @@ pub(crate) fn patch_statsig_gates(config: &mut Value) -> Result<()> {
         input_schema_json_key.clone(),
         gate(&input_schema_json_key, true),
     );
+    gates.insert(
+        goal_continuation_key.clone(),
+        gate(&goal_continuation_key, true),
+    );
+    gates.insert(goal_tools_key.clone(), gate(&goal_tools_key, true));
     tracing::info!(
         hash_used,
         retries_key = %retries_key,
@@ -228,7 +241,9 @@ pub(crate) fn patch_statsig_gates(config: &mut Value) -> Result<()> {
         meta_mcp_key = %meta_mcp_key,
         meta_slim_key = %meta_slim_key,
         input_schema_json_key = %input_schema_json_key,
-        "patched Cursor Statsig gates (agent host + websocket disabled, MCP meta enabled)"
+        goal_continuation_key = %goal_continuation_key,
+        goal_tools_key = %goal_tools_key,
+        "patched Cursor Statsig gates (agent host + websocket disabled, MCP meta + goals enabled)"
     );
     Ok(())
 }

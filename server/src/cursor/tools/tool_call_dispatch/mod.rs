@@ -63,7 +63,9 @@ pub(super) async fn start(
         "write" | "strreplace" | "editnotebook" => edit::start(runtime, call, context).await,
         "askquestion" | "websearch" | "webfetch" | "switchmode" | "createplan"
         | "generateimage" => interaction::start(runtime, call).await,
-        "todowrite" | "updatecurrentstep" => local::start(call, message_index),
+        "todowrite" | "updatecurrentstep" | "creategoal" | "updategoal" => {
+            local::start(call, message_index, context)
+        }
         "semblesearch" | "semblefindrelated" => search::start(results, call, store.cloned()),
         _ => Ok(unavailable_tool(call)),
     }

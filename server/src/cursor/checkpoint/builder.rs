@@ -6,6 +6,7 @@ use prost::Message;
 use crate::{
     cursor::{
         checkpoint::{messages, PendingSteps},
+        goal::GoalHandle,
         protocol::proto::agent::v1 as pb,
         services::blob_sync::BlobSynchronizer,
         transport::TransportHandle,
@@ -23,6 +24,7 @@ pub struct CheckpointBuilder {
     pub(super) sync: BlobSynchronizer,
     pub(super) parent_tool_call_id: Option<String>,
     pub(super) base: pb::ConversationStateStructure,
+    pub(super) goal: GoalHandle,
     pub(super) model: String,
     pub(super) max_context_tokens: Option<u64>,
     pub(super) instructions: String,
@@ -41,12 +43,14 @@ impl CheckpointBuilder {
         sync: BlobSynchronizer,
         parent_tool_call_id: Option<String>,
         base: Option<pb::ConversationStateStructure>,
+        goal: GoalHandle,
     ) -> Self {
         Self {
             store,
             sync,
             parent_tool_call_id,
             base: base.unwrap_or_default(),
+            goal,
             model: String::new(),
             max_context_tokens: None,
             instructions: String::new(),
@@ -58,6 +62,10 @@ impl CheckpointBuilder {
             turn: None,
             turns_initialized: false,
         }
+    }
+
+    pub(crate) fn goal(&self) -> &GoalHandle {
+        &self.goal
     }
 
     pub fn configure(
@@ -163,6 +171,7 @@ impl CheckpointBuilder {
         let (todo_ids, plan_id) = self.build_derived_state(messages).await?;
         self.base.todos = todo_ids.iter().map(|id| id.as_bytes().to_vec()).collect();
         self.base.plan = plan_id.as_ref().map(|id| id.as_bytes().to_vec());
+        self.base.goal_state = self.goal.snapshot();
         let communicate_update_states_by_parent_tool_call_id = self
             .parent_tool_call_id
             .as_ref()

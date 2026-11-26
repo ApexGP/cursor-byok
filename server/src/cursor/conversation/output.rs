@@ -821,6 +821,7 @@ impl ConversationOutput {
             return Ok(None);
         }
         completions.insert(result.call_id.clone(), completion.clone());
+        self.checkpoint.goal().note_tool_call();
         let Some(dispatched) = self.tools.continue_after(&result.call_id).await? else {
             return Ok(None);
         };

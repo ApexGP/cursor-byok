@@ -72,6 +72,11 @@ server/
 │   │   │       ├── encode.rs                   # ≈280 行；Message → Checkpoint
 │   │   │       └── tests.rs                    # ≈250 行；稳定性测试
 │   │   │
+│   │   ├── goal/                               # ≈470 行；持久 Goal 状态
+│   │   │   ├── mod.rs                          # ≈10 行；模块导出
+│   │   │   ├── handle.rs                       # ≈370 行；Goal 状态、计数与 active time
+│   │   │   └── continuation.rs                 # ≈100 行；Continuation 用户消息
+│   │   │
 │   │   ├── tools/                              # ≈6,500 行；可扩展 Tool 系统
 │   │   │   ├── mod.rs                          # ≈180 行；公共类型和注册
 │   │   │   ├── registry.rs                     # ≈180 行；Tool 定义
@@ -100,6 +105,7 @@ server/
 │   │   │       ├── mod.rs                      # ≈180 行；统一结果
 │   │   │       ├── gate.rs                     # ≈850 行；完成关联和门控
 │   │   │       ├── interaction.rs              # ≈450 行；用户交互结果
+│   │   │       ├── goal.rs                     # ≈210 行；CreateGoal/UpdateGoal 结果
 │   │   │       ├── local.rs                    # ≈220 行；本地工具结果
 │   │   │       ├── mcp.rs                      # ≈80 行；MCP 结果
 │   │   │       ├── mcp_state.rs                # ≈150 行；MCP 状态
@@ -620,6 +626,7 @@ cursor/transport
 cursor/conversation
 ├── cursor/compile
 ├── cursor/checkpoint
+├── cursor/goal
 ├── cursor/tools
 ├── cursor/protocol
 └── run
@@ -629,14 +636,23 @@ run
 ├── provider
 └── store
 
+cursor/compile
+├── cursor/goal
+└── cursor/checkpoint
+
 cursor/checkpoint
 ├── model
 ├── store
+├── cursor/goal
 └── cursor/protocol
 
 cursor/tools
 ├── model
 ├── store
+├── cursor/goal
+└── cursor/protocol
+
+cursor/goal
 └── cursor/protocol
 
 provider
