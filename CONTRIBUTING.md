@@ -250,8 +250,8 @@ must not be exposed to untrusted networks.
 
 There are three update manifests with different formats: Tauri `latest.json`,
 legacy `update.json`, and Windows portable `portable-latest.json`. Do not mix
-them. Releases are owner-gated and signed; version bumps and release changes are
-maintainer work, not part of a feature PR.
+them. Releases are owner-gated and use signed or checksummed artifacts; version
+bumps and release changes are maintainer work, not part of a feature PR.
 
 ### Diagnostics
 
@@ -321,5 +321,5 @@ bodies, credentials, or full database files.
 - Update `README.md` and `README-CN.md` for user-facing behavior.
 - Update this file for setup, architecture, or review-process changes.
 - Update [SECURITY.md](./SECURITY.md) when the trust boundary changes.
-- Do not add new private process documents; keep contributor guidance in these
-  tracked files.
+- Keep contributor guidance in tracked files; do not rely on untracked local
+  process notes.
