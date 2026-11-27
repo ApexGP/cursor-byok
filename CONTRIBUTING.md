@@ -250,7 +250,9 @@ MCP tools join the catalog dynamically; duplicate names are rejected. When
 `<dynamic_tools>` catalog plus the `GetMcpTools` / `CallMcpTool` contract
 instead of full static schemas, and an unauthenticated namespace is retried
 through `mcp_auth`. Subagents are separate runs linked by `parent_run_id` and
-`parent_tool_call_id`, and a subagent cannot nest another Task.
+`parent_tool_call_id`, and a subagent cannot nest another Task. Subagent model
+overrides are keyed by the Task's `subagent_type`; apply only the matching
+entry and never reuse another type's override.
 
 ### Storage
 

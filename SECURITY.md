@@ -76,6 +76,10 @@ are not part of this project's schema. Any write to them must:
 - be covered by a rollback test and a clear explanation of why Cursor's own
   cleanup is insufficient.
 
+The composer `chatGenerationUUID` repair is the current write path: it runs
+while Cursor is stopped, snapshots `state.vscdb` and its WAL/SHM sidecars before
+writing, preserves unknown fields, and commits the updates in one transaction.
+
 A write to Cursor-owned state without backup or a guarded lifecycle is a
 security and data-loss risk.
 
