@@ -1,11 +1,13 @@
 //! Coordinates construction of a complete Cursor checkpoint.
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
+use parking_lot::Mutex;
 use prost::Message;
 
 use crate::{
     cursor::{
         checkpoint::{messages, PendingSteps},
+        goal::GoalHandle,
         protocol::proto::agent::v1 as pb,
         services::blob_sync::BlobSynchronizer,
         transport::TransportHandle,
@@ -23,6 +25,7 @@ pub struct CheckpointBuilder {
     pub(super) sync: BlobSynchronizer,
     pub(super) parent_tool_call_id: Option<String>,
     pub(super) base: pb::ConversationStateStructure,
+    pub(super) goal: GoalHandle,
     pub(super) model: String,
     pub(super) max_context_tokens: Option<u64>,
     pub(super) instructions: String,
@@ -33,6 +36,10 @@ pub struct CheckpointBuilder {
     pub(super) roots: Option<RootFrontier>,
     pub(super) turn: Option<TurnFrontier>,
     pub(super) turns_initialized: bool,
+    /// Last state handed to the client. A goal continuation starts from here,
+    /// so it resumes the conversation head instead of the request that opened
+    /// the previous turn.
+    pub(super) published: Arc<Mutex<Option<pb::ConversationStateStructure>>>,
 }
 
 impl CheckpointBuilder {
@@ -41,12 +48,15 @@ impl CheckpointBuilder {
         sync: BlobSynchronizer,
         parent_tool_call_id: Option<String>,
         base: Option<pb::ConversationStateStructure>,
+        goal: GoalHandle,
+        published: Arc<Mutex<Option<pb::ConversationStateStructure>>>,
     ) -> Self {
         Self {
             store,
             sync,
             parent_tool_call_id,
             base: base.unwrap_or_default(),
+            goal,
             model: String::new(),
             max_context_tokens: None,
             instructions: String::new(),
@@ -57,7 +67,12 @@ impl CheckpointBuilder {
             roots: None,
             turn: None,
             turns_initialized: false,
+            published,
         }
+    }
+
+    pub(crate) fn goal(&self) -> &GoalHandle {
+        &self.goal
     }
 
     pub fn configure(
@@ -163,6 +178,7 @@ impl CheckpointBuilder {
         let (todo_ids, plan_id) = self.build_derived_state(messages).await?;
         self.base.todos = todo_ids.iter().map(|id| id.as_bytes().to_vec()).collect();
         self.base.plan = plan_id.as_ref().map(|id| id.as_bytes().to_vec());
+        self.base.goal_state = self.goal.snapshot();
         let communicate_update_states_by_parent_tool_call_id = self
             .parent_tool_call_id
             .as_ref()
@@ -277,6 +293,9 @@ impl CheckpointBuilder {
                 pb::agent_server_message::Message::ConversationCheckpointUpdate(checkpoint.clone()),
             ),
         });
+        if result.is_ok() {
+            *self.published.lock() = Some(checkpoint.clone());
+        }
         if let Some(trace) = handle.trace() {
             trace.artifact(
                 "checkpoint",

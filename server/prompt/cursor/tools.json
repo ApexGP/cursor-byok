@@ -897,6 +897,47 @@
           ]
         }
       }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "CreateGoal",
+        "description": "Create a long-running goal. Only use this tool when explicitly requested by the user; NEVER use this tool for ordinary tasks.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "objective": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "objective"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "UpdateGoal",
+        "description": "Update the existing goal's status. Set status to `complete` only when the objective has actually been achieved and no required work remains, unless the user explicitly requests to stop the goal. You cannot use this tool to pause a goal; that is controlled by the user. However, if the user paused and asks you to resume, you can set it to `active`.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "active",
+                "complete"
+              ]
+            }
+          },
+          "required": [
+            "status"
+          ]
+        }
+      }
     }
   ],
   "variants": {}

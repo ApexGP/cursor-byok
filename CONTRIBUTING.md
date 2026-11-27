@@ -101,6 +101,7 @@ cursor-byok/
 │   │   │   ├── compile/           # action, message, context, model compilation
 │   │   │   │   └── context/       # request context, rules, globs, per-turn attachment
 │   │   │   ├── checkpoint/        # durable conversation state
+│   │   │   ├── goal/              # goal state machine, continuation accounting
 │   │   │   ├── tools/             # dispatch, wire codec, completion gate
 │   │   │   ├── protocol/          # framing and server events
 │   │   │   ├── prompting/         # prompt assets, catalog, compilation
@@ -137,6 +138,10 @@ api/cursor
 
 `run`, `provider`, `store`, and `model` must not depend on `cursor`. The generic
 agent loop must stay usable without the Cursor protocol.
+
+Within `cursor`, `compile`, `checkpoint`, and `tools` depend on `goal`, and
+`goal` depends only on `protocol`. Goal state is carried by the checkpoint so a
+continuation can resume after a restart.
 
 There are two API surfaces:
 
@@ -189,6 +194,27 @@ queues later inserts and breaks as pending, commits the final message, waits for
 the checkpoint barrier, and returns `RunClosing`. `Ended` returns `RunEnded`.
 `CommandResult` distinguishes `Applied`, `Duplicate`, `RunClosing`, `RunEnded`,
 and `StaleTarget` so callers know whether to retry against the next run.
+
+A goal continuation is a simulated user turn with its own message id, started by
+the run loop on `TurnCompleted` for an active goal in a root conversation.
+Paused or unavailable goals settle the turn without a model call
+(`skip_model`). Goal edits, pause/resume, replacement, and clearing stay with
+Cursor: before continuing, the run reads the persisted composer goal back, but
+only once the cache has applied a checkpoint newer than the goal.
+
+| Goal status | Idle streak | Turn ends |
+| --- | --- | --- |
+| active | 0–2 | continue: counters and active time advance, next turn starts |
+| active | ≥3 | pause: status becomes paused, no model call, checkpoint updates |
+| active | any, tool call | idle streak resets, the next turn continues |
+| paused | any | stop |
+| complete | any | stop |
+| cleared | any | stop; the cleared status is persisted with the next checkpoint |
+
+There is no numeric continuation cap: a productive goal may run for hours or
+days. The loop ends when the goal is completed, paused, cleared, or when it
+keeps ending turns without tool activity. Clearing the goal is the user's
+cancel.
 
 ### Checkpoint and prefix stability
 

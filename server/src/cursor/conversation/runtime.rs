@@ -6,8 +6,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cursor::{
-        checkpoint::CheckpointBuilder,
+        checkpoint::{CheckpointBuilder, PendingSteps},
         compile,
+        goal::{GoalHandle, STATUS_ACTIVE},
         protocol::proto::agent::v1 as pb,
         services::{blob_sync::BlobSynchronizer, context_sync::RequestContextSynchronizer},
         tools::{
@@ -18,6 +19,7 @@ use crate::{
         },
         transport::{OrderedInbox, TransportHandle},
     },
+    local_app::composer_state::{self, ClientGoal},
     run::{CommandResult, RunEngine, RunHandle, RunPhase},
 };
 
@@ -34,6 +36,7 @@ const CONTINUATION_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from
 struct RunGeneration {
     id: u64,
     request: pb::AgentRunRequest,
+    goal: GoalHandle,
     superseded: CancellationToken,
     finished: CancellationToken,
     run: Arc<parking_lot::Mutex<Option<RunHandle>>>,
@@ -41,6 +44,9 @@ struct RunGeneration {
     runtime_actions: mpsc::UnboundedSender<compile::RuntimeAction>,
     tool_runtime: CursorToolRuntime,
     tools: ToolDispatcher,
+    /// Conversation state last published to the client. A goal continuation
+    /// resumes from it so the turn it extends is part of the next request.
+    published: Arc<parking_lot::Mutex<Option<pb::ConversationStateStructure>>>,
 }
 
 struct FinishGeneration(CancellationToken);
@@ -182,7 +188,20 @@ impl ConversationRuntime {
                             RunFinish::TurnCompleted => {
                                 pending_finish = None;
                                 draining = false;
-                                waiting_for_action = true;
+                                // A goal keeps the turn open: the continuation
+                                // starts here instead of waiting for Cursor to
+                                // schedule one after it observed the turn end.
+                                waiting_for_action = !continue_goal(
+                                    &registry,
+                                    &handle,
+                                    &dependencies,
+                                    &blob_sync,
+                                    &context_sync,
+                                    &tool_runtime_factory,
+                                    &mut current,
+                                    &mut next_generation,
+                                )
+                                .await;
                             }
                             RunFinish::Transport(finish) => {
                                 waiting_for_action = false;
@@ -230,6 +249,7 @@ impl ConversationRuntime {
                                             &mut current,
                                             &mut next_generation,
                                             request,
+                                            None,
                                         )
                                         .await;
                                     }
@@ -386,7 +406,7 @@ impl ConversationRuntime {
                                     // ShellCommandAction, StartPlanAction,
                                     // AsyncAskQuestionCompletionAction, BackgroundShellAction,
                                     // BackgroundSubagentAction,
-                                    // SubscriptionNotificationAction and GoalContinuationAction.
+                                    // SubscriptionNotificationAction.
                                     // Variants whose wire behavior is not captured yet need evidence
                                     // before assigning semantics. Every unsupported runtime Action must
                                     // return an explicit Protocol Error rather than falling through silently.
@@ -421,6 +441,7 @@ impl ConversationRuntime {
                                             request.action = Some(conversation_action);
                                             request.conversation_state = None;
                                             request.pre_fetched_blobs.clear();
+                                            let goal = previous.goal.clone();
                                             waiting_for_action = false;
                                             start_generation(
                                                 &registry,
@@ -432,6 +453,7 @@ impl ConversationRuntime {
                                                 &mut current,
                                                 &mut next_generation,
                                                 request,
+                                                Some(goal),
                                             )
                                             .await;
                                         }
@@ -481,6 +503,43 @@ impl ConversationRuntime {
                                                 }
                                             }
                                         }
+                                        Some(
+                                            pb::conversation_action::Action::GoalContinuationAction(
+                                                _,
+                                            ),
+                                        ) => {
+                                            let Some(previous) = current.as_ref() else {
+                                                continue;
+                                            };
+                                            // Cursor schedules a continuation once it observes
+                                            // the turn end, but the Run loop already continues
+                                            // an active goal. Restarting here would abort the
+                                            // live turn and count the same continuation twice.
+                                            let continuing =
+                                                previous.goal.snapshot().is_some_and(|goal| {
+                                                    goal.status == STATUS_ACTIVE
+                                                }) && previous.run.lock().as_ref().is_some_and(
+                                                    |run| run.phase() == RunPhase::Running,
+                                                );
+                                            if continuing {
+                                                continue;
+                                            }
+                                            let goal = previous.goal.clone();
+                                            waiting_for_action = false;
+                                            start_goal_continuation(
+                                                &registry,
+                                                &handle,
+                                                &dependencies,
+                                                &blob_sync,
+                                                &context_sync,
+                                                &tool_runtime_factory,
+                                                &mut current,
+                                                &mut next_generation,
+                                                conversation_action,
+                                                goal,
+                                            )
+                                            .await;
+                                        }
                                         Some(action) => {
                                             tracing::warn!(
                                                 request_id = handle.request_id(),
@@ -521,6 +580,7 @@ async fn start_generation(
     current: &mut Option<RunGeneration>,
     next_generation: &mut u64,
     request: pb::AgentRunRequest,
+    previous_goal: Option<GoalHandle>,
 ) {
     let previous_finished = if let Some(previous) = current.take() {
         previous.superseded.cancel();
@@ -538,6 +598,13 @@ async fn start_generation(
     let (runtime_actions, runtime_action_receiver) =
         mpsc::unbounded_channel::<compile::RuntimeAction>();
     let tool_runtime = tool_runtime_factory.next_run();
+    let goal = GoalHandle::new(
+        request
+            .conversation_state
+            .as_ref()
+            .and_then(|state| state.goal_state.clone())
+            .or_else(|| previous_goal.and_then(|goal| goal.snapshot())),
+    );
     let tools = ToolDispatcher::with_results(
         tool_runtime.clone(),
         results.clone(),
@@ -547,6 +614,7 @@ async fn start_generation(
     let generation = RunGeneration {
         id: *next_generation,
         request: request.clone(),
+        goal,
         superseded: CancellationToken::new(),
         finished: CancellationToken::new(),
         run: Arc::new(parking_lot::Mutex::new(None)),
@@ -554,6 +622,7 @@ async fn start_generation(
         runtime_actions,
         tool_runtime,
         tools,
+        published: Arc::new(parking_lot::Mutex::new(None)),
     };
     *next_generation = next_generation.saturating_add(1);
     *current = Some(generation.clone());
@@ -569,6 +638,154 @@ async fn start_generation(
         result_receiver,
         runtime_action_receiver,
     );
+}
+
+/// Keeps an active goal moving inside the turn that is already open. Cursor
+/// only schedules a continuation once it has observed the turn end, so a stale
+/// or lost composer cache used to stall the goal; owning the loop here makes
+/// the goal independent of that cache. Returns whether a generation started.
+#[allow(clippy::too_many_arguments)]
+async fn continue_goal(
+    registry: &ConversationRegistry,
+    handle: &TransportHandle,
+    dependencies: &ConversationDependencies,
+    blob_sync: &BlobSynchronizer,
+    context_sync: &RequestContextSynchronizer,
+    tool_runtime_factory: &CursorToolRuntime,
+    current: &mut Option<RunGeneration>,
+    next_generation: &mut u64,
+) -> bool {
+    let Some(previous) = current.as_ref() else {
+        return false;
+    };
+    // Goal continuation belongs to the root conversation; a subagent turn ends
+    // so it can report its result back to the parent.
+    if handle.parent().is_some() || !handle.accepting_appends() {
+        return false;
+    }
+    let goal = previous.goal.clone();
+    let Some(state) = goal.snapshot() else {
+        return false;
+    };
+    if state.status != STATUS_ACTIVE {
+        return false;
+    }
+    let conversation_id = previous
+        .request
+        .conversation_id
+        .clone()
+        .filter(|id| !id.is_empty());
+    if let Some(conversation_id) = conversation_id.as_deref() {
+        // Cursor owns goal edits, pause/resume, and clearing. It flushes them
+        // to its cache immediately, so adopt them before extending the turn.
+        let client =
+            composer_state::read_goal(conversation_id, goal.created_at_ms().unwrap_or(0)).await;
+        match client {
+            ClientGoal::Cleared => {
+                goal.clear(crate::cursor::tools::runtime::now_ms());
+                tracing::info!(
+                    conversation_id,
+                    goal_id = %state.goal_id,
+                    "client cleared the goal; ending the turn"
+                );
+                return false;
+            }
+            ClientGoal::Present(client)
+                if !goal.adopt(&client, crate::cursor::tools::runtime::now_ms()) =>
+            {
+                tracing::info!(
+                    conversation_id,
+                    goal_id = %client.goal_id,
+                    status = client.status,
+                    "client goal is no longer active; ending the turn"
+                );
+                return false;
+            }
+            _ => {}
+        }
+    }
+    let Some(state) = goal.snapshot() else {
+        return false;
+    };
+    tracing::info!(
+        conversation_id = conversation_id.as_deref().unwrap_or_default(),
+        goal_id = %state.goal_id,
+        continuation_count = state.continuation_count,
+        "continuing the active goal inside the open turn"
+    );
+    let conversation_action = pb::ConversationAction {
+        action: Some(pb::conversation_action::Action::GoalContinuationAction(
+            pb::GoalContinuationAction {},
+        )),
+        ..Default::default()
+    };
+    start_goal_continuation(
+        registry,
+        handle,
+        dependencies,
+        blob_sync,
+        context_sync,
+        tool_runtime_factory,
+        current,
+        next_generation,
+        conversation_action,
+        goal,
+    )
+    .await;
+    true
+}
+
+/// Starts a continuation generation on the open transport. Cursor's
+/// `GoalContinuationAction` and the Run loop's own continuation share this so
+/// the two entry points cannot drift.
+#[allow(clippy::too_many_arguments)]
+async fn start_goal_continuation(
+    registry: &ConversationRegistry,
+    handle: &TransportHandle,
+    dependencies: &ConversationDependencies,
+    blob_sync: &BlobSynchronizer,
+    context_sync: &RequestContextSynchronizer,
+    tool_runtime_factory: &CursorToolRuntime,
+    current: &mut Option<RunGeneration>,
+    next_generation: &mut u64,
+    conversation_action: pb::ConversationAction,
+    goal: GoalHandle,
+) {
+    let Some(previous) = current.as_ref() else {
+        return;
+    };
+    let published = previous.published.lock().clone();
+    let mut request = previous.request.clone();
+    request.action = Some(conversation_action);
+    // Extend the turn from the state the client last received. Reusing the
+    // request that opened the previous turn would hydrate a stale history and
+    // import it as the conversation head, dropping the turn's own messages.
+    match published.or_else(|| request.conversation_state.clone()) {
+        Some(mut state) => {
+            state.goal_state = goal.snapshot();
+            request.conversation_state = Some(state);
+        }
+        None => {
+            request.conversation_state = Some(pb::ConversationStateStructure {
+                goal_state: goal.snapshot(),
+                ..Default::default()
+            });
+        }
+    }
+    request.pre_fetched_blobs.clear();
+    start_generation(
+        registry,
+        handle,
+        dependencies,
+        blob_sync,
+        context_sync,
+        tool_runtime_factory,
+        current,
+        next_generation,
+        request,
+        Some(goal),
+    )
+    .await;
 }
 
 fn fill_missing_user_message_id(request: &mut pb::AgentRunRequest, request_id: &str) {
@@ -661,6 +878,8 @@ fn spawn_run_request(
             blob_sync.clone(),
             handle.parent().map(|parent| parent.tool_call_id.clone()),
             request.conversation_state.clone(),
+            generation.goal.clone(),
+            generation.published.clone(),
         );
         let subagent_model = handle
             .parent()
@@ -711,6 +930,50 @@ fn spawn_run_request(
             context.dynamic_tools.keys().cloned().collect(),
             context.turn_user.clone(),
         );
+        if context.skip_model {
+            let messages = dependencies
+                .store
+                .load_checkpoint_messages(prepared.base_checkpoint_id)
+                .await;
+            let state = match messages {
+                Ok(messages) => {
+                    checkpoint
+                        .settled(&messages, context.mode, &PendingSteps::default())
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            let finish = match state {
+                Ok(state) => match checkpoint.publish(&handle, &state).await {
+                    Ok(()) => RunFinish::Transport(TransportFinish::Success),
+                    Err(error) => {
+                        tracing::error!(
+                            request_id = handle.request_id(),
+                            %error,
+                            "failed to publish goal checkpoint"
+                        );
+                        RunFinish::Transport(TransportFinish::Failed(error))
+                    }
+                },
+                Err(error) => {
+                    tracing::error!(
+                        request_id = handle.request_id(),
+                        %error,
+                        "failed to build goal checkpoint"
+                    );
+                    RunFinish::Transport(TransportFinish::Failed(error))
+                }
+            };
+            if !generation.superseded.is_cancelled() {
+                let _ = handle
+                    .command(TransportCommand::RunFinished {
+                        generation: generation.id,
+                        finish,
+                    })
+                    .await;
+            }
+            return;
+        }
         if context.background_completion {
             let event_id = prepared
                 .initial_messages

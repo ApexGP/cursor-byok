@@ -3170,6 +3170,7 @@ message GoalState {
   optional uint64 last_accrued_at_ms = 7;
   uint32 continuation_count = 8;
   optional string agent_session_id = 9;
+  optional int32 context_tokens_added = 11;
 }
 
 // Copied from: local:agent.v1.GoalStatus (var: q_e)

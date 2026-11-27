@@ -85,6 +85,7 @@ impl CheckpointBuilder {
                 .push(archive_id.as_bytes().to_vec());
         }
         self.base.self_summary_count = self.base.self_summary_count.saturating_add(1);
+        self.base.goal_state = self.goal.snapshot();
         let projected = project_messages(messages)?;
         let prompt = PromptSpec {
             instructions: self.instructions.clone(),

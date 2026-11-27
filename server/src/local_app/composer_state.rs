@@ -14,14 +14,94 @@
 
 use std::{path::Path, time::Duration};
 
+use base64::{engine::general_purpose::STANDARD, Engine};
+use prost::Message;
 use serde_json::Value;
 use sqlx::{sqlite::SqliteConnectOptions, Connection, Row, SqliteConnection};
 
-use crate::Result;
+use crate::{cursor::protocol::proto::agent::v1 as pb, Result};
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Goal read-back happens inside a Run, so it must never stall the turn.
+const READ_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 const COMPOSER_PREFIX: &str = "composerData:";
 const BACKUP_EXTENSION: &str = "vscdb.cursor-byok.composer.bak";
+
+/// What Cursor's composer cache says about the goal of a conversation.
+#[derive(Debug)]
+pub(crate) enum ClientGoal {
+    /// The cache is missing, unreadable, or older than the goal we hold.
+    Unknown,
+    /// The composer applied a newer checkpoint and no longer carries a goal.
+    Cleared,
+    Present(pb::GoalState),
+}
+
+/// Reads the goal Cursor persisted for `conversation_id`. Cursor flushes goal
+/// mutations (edit, pause, resume, clear) immediately, so this is how the Run
+/// loop learns about them while a goal turn stays open. `goal_since_ms` is the
+/// goal's creation time: a cache older than that has not seen this goal yet.
+pub(crate) async fn read_goal(conversation_id: &str, goal_since_ms: u64) -> ClientGoal {
+    let Ok(path) = super::account::state_db_path() else {
+        return ClientGoal::Unknown;
+    };
+    read_goal_at(&path, conversation_id, goal_since_ms).await
+}
+
+pub(crate) async fn read_goal_at(
+    path: &Path,
+    conversation_id: &str,
+    goal_since_ms: u64,
+) -> ClientGoal {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(false)
+        .busy_timeout(READ_BUSY_TIMEOUT);
+    let Ok(mut connection) = SqliteConnection::connect_with(&options).await else {
+        return ClientGoal::Unknown;
+    };
+    let row = sqlx::query("SELECT CAST(value AS TEXT) AS value FROM cursorDiskKV WHERE key = ?")
+        .bind(format!("{COMPOSER_PREFIX}{conversation_id}"))
+        .fetch_optional(&mut connection)
+        .await;
+    let Ok(Some(row)) = row else {
+        return ClientGoal::Unknown;
+    };
+    let Ok(text) = row.try_get::<String, _>("value") else {
+        return ClientGoal::Unknown;
+    };
+    parse_goal(&text, goal_since_ms)
+}
+
+/// Decodes `composerData` JSON into the goal it caches.
+fn parse_goal(text: &str, goal_since_ms: u64) -> ClientGoal {
+    let Ok(composer) = serde_json::from_str::<Value>(text) else {
+        return ClientGoal::Unknown;
+    };
+    let applied_at = composer
+        .get("conversationCheckpointLastUpdatedAt")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    if applied_at == 0 || applied_at < goal_since_ms {
+        return ClientGoal::Unknown;
+    }
+    let Some(state) = composer.get("conversationState").and_then(Value::as_str) else {
+        return ClientGoal::Unknown;
+    };
+    let Some(encoded) = state.strip_prefix('~') else {
+        return ClientGoal::Unknown;
+    };
+    let Ok(bytes) = STANDARD.decode(encoded) else {
+        return ClientGoal::Unknown;
+    };
+    let Ok(state) = pb::ConversationStateStructure::decode(bytes.as_slice()) else {
+        return ClientGoal::Unknown;
+    };
+    match state.goal_state {
+        Some(goal) => ClientGoal::Present(goal),
+        None => ClientGoal::Cleared,
+    }
+}
 
 /// Clears `chatGenerationUUID` from every composer Cursor already finished.
 /// Returns the number of repaired composers.
@@ -249,5 +329,91 @@ mod tests {
             read(&path, "composerData:finished").await["chatGenerationUUID"],
             "run-1"
         );
+    }
+
+    fn composer(goal: Option<pb::GoalState>, applied_at: u64) -> Value {
+        let state = pb::ConversationStateStructure {
+            goal_state: goal,
+            ..Default::default()
+        };
+        let encoded = STANDARD.encode(state.encode_to_vec());
+        serde_json::json!({
+            "status": "generating",
+            "conversationState": format!("~{encoded}"),
+            "conversationCheckpointLastUpdatedAt": applied_at,
+        })
+    }
+
+    fn goal() -> pb::GoalState {
+        pb::GoalState {
+            conversation_id: "conversation".into(),
+            goal_id: "60ace89a-3eab-525f-8875-7551b64829e3".into(),
+            objective: "Ship the feature".into(),
+            status: 1,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn reads_the_goal_cursor_persisted() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.vscdb");
+        seed(
+            &path,
+            &[("composerData:conversation", composer(Some(goal()), 2_000))],
+        )
+        .await;
+
+        match read_goal_at(&path, "conversation", 1_000).await {
+            ClientGoal::Present(state) => assert_eq!(state.objective, "Ship the feature"),
+            other => panic!("expected a goal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_a_cleared_goal_only_after_the_cache_caught_up() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.vscdb");
+        seed(
+            &path,
+            &[("composerData:conversation", composer(None, 2_000))],
+        )
+        .await;
+
+        assert!(matches!(
+            read_goal_at(&path, "conversation", 1_000).await,
+            ClientGoal::Cleared
+        ));
+        // The goal is newer than anything Cursor applied: nothing to conclude.
+        assert!(matches!(
+            read_goal_at(&path, "conversation", 3_000).await,
+            ClientGoal::Unknown
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_when_the_composer_is_missing_or_unreadable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.vscdb");
+        seed(
+            &path,
+            &[
+                ("composerData:other", composer(Some(goal()), 2_000)),
+                (
+                    "composerData:broken",
+                    serde_json::json!({"conversationState": "not-base64"}),
+                ),
+            ],
+        )
+        .await;
+
+        assert!(matches!(
+            read_goal_at(&path, "conversation", 1_000).await,
+            ClientGoal::Unknown
+        ));
+        assert!(matches!(
+            read_goal_at(&path, "broken", 1_000).await,
+            ClientGoal::Unknown
+        ));
     }
 }

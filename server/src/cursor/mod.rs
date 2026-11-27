@@ -3,6 +3,7 @@
 pub mod checkpoint;
 pub mod compile;
 pub mod conversation;
+pub mod goal;
 pub mod prompting;
 pub mod protocol;
 pub mod services;

@@ -222,6 +222,8 @@ pub fn tool_placeholder(name: &str, call_id: &str) -> Result<pb::ToolCall> {
             Tool::McpToolCall(pb::McpToolCall::default())
         }
         "createplan" => Tool::CreatePlanToolCall(pb::CreatePlanToolCall::default()),
+        "creategoal" => Tool::CreateGoalToolCall(pb::CreateGoalToolCall::default()),
+        "updategoal" => Tool::UpdateGoalToolCall(pb::UpdateGoalToolCall::default()),
         "websearch" => Tool::WebSearchToolCall(pb::WebSearchToolCall::default()),
         "task" => Tool::TaskToolCall(pb::TaskToolCall::default()),
         "fetchmcpresource" => Tool::ReadMcpResourceToolCall(pb::ReadMcpResourceToolCall::default()),
@@ -428,6 +430,17 @@ pub fn render_tool_call(call: &ToolCall, completed: bool) -> Result<pb::ToolCall
                 name: string("name"),
                 is_project: false,
                 phases: Vec::new(),
+            })
+        }
+        Some(pb::tool_call::Tool::CreateGoalToolCall(tool)) => {
+            tool.args = Some(pb::CreateGoalArgs {
+                objective: string("objective"),
+            })
+        }
+        Some(pb::tool_call::Tool::UpdateGoalToolCall(tool)) => {
+            tool.args = Some(pb::UpdateGoalArgs {
+                status: crate::cursor::goal::GoalHandle::status_argument(&string("status"))
+                    .unwrap_or_default(),
             })
         }
         Some(pb::tool_call::Tool::WebSearchToolCall(tool)) => {

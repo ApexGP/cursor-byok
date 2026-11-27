@@ -531,6 +531,8 @@ mod tests {
         let meta_mcp_key = analytics::djb2("meta_mcp_tool");
         let meta_slim_key = analytics::djb2("mcp_meta_tool_slim_descriptors");
         let input_schema_json_key = analytics::djb2("mcp_input_schema_json");
+        let goal_continuation_key = analytics::djb2("agent_goal_continuation");
+        let goal_tools_key = analytics::djb2("enableGoalTools");
         let statsig = json!({
             "hash_used": "djb2",
             "user": { "userID": "auth0|user_official" },
@@ -575,6 +577,11 @@ mod tests {
             statsig["feature_gates"][input_schema_json_key]["value"],
             true
         );
+        assert_eq!(
+            statsig["feature_gates"][goal_continuation_key]["value"],
+            true
+        );
+        assert_eq!(statsig["feature_gates"][goal_tools_key]["value"], true);
         assert_eq!(statsig["has_updates"], true);
     }
 
