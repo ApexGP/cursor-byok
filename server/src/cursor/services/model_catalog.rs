@@ -5,6 +5,7 @@ use axum::{
     http::{header, HeaderValue, Request, Response, StatusCode},
 };
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::{BufMut, BytesMut};
 use prost::Message;
@@ -31,6 +32,7 @@ const CATALOG_CACHE_FILE: &str = "cursor-available-models.pb";
 /// complete catalog is fetched, which is exactly when Cursor prunes the user's
 /// hidden-model choices.
 static LAST_COMPLETE_CATALOG: std::sync::Mutex<Option<Bytes>> = std::sync::Mutex::new(None);
+static CATALOG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, PartialEq, Message)]
 struct AvailableModelsAddition {
@@ -714,9 +716,19 @@ fn write_catalog(path: &Path, body: &Bytes) -> std::io::Result<()> {
         )
     })?;
     std::fs::create_dir_all(parent)?;
-    let temporary = path.with_extension("tmp");
+    let temporary = temporary_catalog_path(path);
     std::fs::write(&temporary, body)?;
     std::fs::rename(&temporary, path)
+}
+
+/// Concurrent catalog refreshes each need their own temporary file; a shared
+/// `.tmp` name lets one writer publish another writer's half-written body.
+fn temporary_catalog_path(path: &Path) -> PathBuf {
+    path.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        CATALOG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 fn fallback_catalog_body(cached: Option<Bytes>) -> Result<Bytes> {
@@ -1529,6 +1541,18 @@ mod tests {
         let body = Bytes::from_static(b"official+local");
         write_catalog(&path, &body).unwrap();
         assert_eq!(read_catalog(&path).unwrap(), Some(body));
+    }
+
+    #[test]
+    fn catalog_temporary_paths_are_unique() {
+        let path = Path::new("/tmp/catalog.pb");
+        let first = temporary_catalog_path(path);
+        let second = temporary_catalog_path(path);
+        assert_ne!(first, second);
+        assert!(first
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains(&std::process::id().to_string())));
     }
 
     #[test]
