@@ -4,21 +4,32 @@ use axum::{
     extract::{Extension, State},
     http::{header, HeaderValue, Request, Response, StatusCode},
 };
+use std::path::{Path, PathBuf};
+
 use bytes::{BufMut, BytesMut};
 use prost::Message;
 use serde_json::{Map, Value};
 
 use crate::{
     api::cursor::proxy::{self, CursorProxy},
+    config,
     cursor::{protocol::proto::agent::v1 as agent, transport::TransportRegistry},
     model::{format_token_count, parse_token_count, resolve_default_model_id, ModelConfig},
     Error, Result,
 };
 
+const CATALOG_CACHE_DIR: &str = "cache";
+const CATALOG_CACHE_FILE: &str = "cursor-available-models.pb";
+
 /// Last successfully merged `AvailableModels` body (official models plus BYOK
 /// additions). Cursor filters `aiSettings.modelOverrideDisabled` to the IDs in
 /// each catalog response, so answering a transient upstream failure with a
 /// local-only catalog makes it silently forget every hidden official model.
+///
+/// The cache is persisted because an app restart would otherwise lose the last
+/// complete catalog; the first request after a restart can fail before a new
+/// complete catalog is fetched, which is exactly when Cursor prunes the user's
+/// hidden-model choices.
 static LAST_COMPLETE_CATALOG: std::sync::Mutex<Option<Bytes>> = std::sync::Mutex::new(None);
 
 #[derive(Clone, PartialEq, Message)]
@@ -342,16 +353,13 @@ pub async fn available_models(
                         );
                         Ok(local_response(cached.to_vec()))
                     } else {
-                        tracing::warn!(
-                            "Cursor AvailableModels returned no models; serving local-only catalog"
-                        );
-                        Ok(response)
+                        Err(missing_catalog_error())
                     }
                 }
                 Err(error) => {
                     tracing::warn!(%error, "Cursor AvailableModels merge failed");
                     Ok(local_response(
-                        fallback_catalog_body(cached_catalog(), local).to_vec(),
+                        fallback_catalog_body(cached_catalog())?.to_vec(),
                     ))
                 }
             }
@@ -362,13 +370,13 @@ pub async fn available_models(
                 "Cursor AvailableModels upstream rejected request"
             );
             Ok(local_response(
-                fallback_catalog_body(cached_catalog(), local).to_vec(),
+                fallback_catalog_body(cached_catalog())?.to_vec(),
             ))
         }
         Err(error) => {
             tracing::warn!(%error, "Cursor AvailableModels upstream unavailable");
             Ok(local_response(
-                fallback_catalog_body(cached_catalog(), local).to_vec(),
+                fallback_catalog_body(cached_catalog())?.to_vec(),
             ))
         }
     }
@@ -640,32 +648,100 @@ fn remember_catalog(body: &Bytes) {
         Ok(mut cached) => *cached = Some(body.clone()),
         Err(error) => tracing::warn!(%error, "Cursor catalog cache lock poisoned"),
     }
+    let Some(path) = catalog_cache_path() else {
+        return;
+    };
+    if let Err(error) = write_catalog(&path, body) {
+        tracing::warn!(
+            %error,
+            path = %path.display(),
+            "failed to persist the complete Cursor catalog"
+        );
+    }
 }
 
 fn cached_catalog() -> Option<Bytes> {
-    LAST_COMPLETE_CATALOG
-        .lock()
-        .ok()
-        .and_then(|cached| cached.clone())
+    if let Ok(cached) = LAST_COMPLETE_CATALOG.lock() {
+        if let Some(body) = cached.as_ref() {
+            return Some(body.clone());
+        }
+    }
+    let path = catalog_cache_path()?;
+    match read_catalog(&path) {
+        Ok(Some(body)) => {
+            tracing::info!(
+                bytes = body.len(),
+                path = %path.display(),
+                "loaded the persisted complete Cursor catalog"
+            );
+            if let Ok(mut cached) = LAST_COMPLETE_CATALOG.lock() {
+                *cached = Some(body.clone());
+            }
+            Some(body)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                path = %path.display(),
+                "failed to read the persisted Cursor catalog"
+            );
+            None
+        }
+    }
 }
 
-fn fallback_catalog_body(cached: Option<Bytes>, local: Vec<u8>) -> Bytes {
+fn catalog_cache_path() -> Option<PathBuf> {
+    config::managed_data_dir()
+        .ok()
+        .map(|directory| directory.join(CATALOG_CACHE_DIR).join(CATALOG_CACHE_FILE))
+}
+
+fn read_catalog(path: &Path) -> std::io::Result<Option<Bytes>> {
+    match std::fs::read(path) {
+        Ok(bytes) if bytes.is_empty() => Ok(None),
+        Ok(bytes) => Ok(Some(Bytes::from(bytes))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn write_catalog(path: &Path, body: &Bytes) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "catalog cache path has no parent directory",
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, body)?;
+    std::fs::rename(&temporary, path)
+}
+
+fn fallback_catalog_body(cached: Option<Bytes>) -> Result<Bytes> {
     match cached {
         Some(body) => {
             tracing::warn!(
                 bytes = body.len(),
                 "serving the last complete Cursor catalog"
             );
-            body
+            Ok(body)
         }
-        None => {
-            tracing::warn!(
-                bytes = local.len(),
-                "no complete Cursor catalog cached; serving local-only catalog"
-            );
-            Bytes::from(local)
-        }
+        None => Err(missing_catalog_error()),
     }
+}
+
+/// Refuses to answer with a partial catalog. Cursor prunes every hidden model
+/// missing from a successful response, so the local-only fallback used to lose
+/// the user's preferences whenever the first request after a restart failed.
+fn missing_catalog_error() -> Error {
+    tracing::error!(
+        "no complete Cursor catalog is cached; refusing to serve a partial catalog that would reset model preferences"
+    );
+    Error::Protocol(
+        "Cursor AvailableModels is unavailable and no complete catalog is cached".into(),
+    )
 }
 
 /// Official catalog fields that must not apply to appended BYOK models:
@@ -1439,15 +1515,32 @@ mod tests {
     #[test]
     fn fallback_prefers_the_last_complete_catalog() {
         let cached = Bytes::from_static(b"official+local");
-        let local = b"local".to_vec();
+        assert_eq!(fallback_catalog_body(Some(cached.clone())).unwrap(), cached);
+        assert!(fallback_catalog_body(None).is_err());
+    }
+
+    #[test]
+    fn persisted_catalog_round_trips() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join(CATALOG_CACHE_DIR)
+            .join(CATALOG_CACHE_FILE);
+        let body = Bytes::from_static(b"official+local");
+        write_catalog(&path, &body).unwrap();
+        assert_eq!(read_catalog(&path).unwrap(), Some(body));
+    }
+
+    #[test]
+    fn missing_or_empty_persisted_catalog_is_absent() {
+        let directory = tempfile::tempdir().unwrap();
         assert_eq!(
-            fallback_catalog_body(Some(cached.clone()), local.clone()),
-            cached
+            read_catalog(&directory.path().join("missing.pb")).unwrap(),
+            None
         );
-        assert_eq!(
-            fallback_catalog_body(None, local),
-            Bytes::from_static(b"local")
-        );
+        let empty = directory.path().join("empty.pb");
+        std::fs::write(&empty, b"").unwrap();
+        assert_eq!(read_catalog(&empty).unwrap(), None);
     }
 
     #[test]

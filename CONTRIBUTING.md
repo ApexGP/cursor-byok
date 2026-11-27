@@ -292,6 +292,12 @@ so the stopped check must cover the whole read-modify-write. It copies the
 database and its WAL/SHM sidecars to `state.vscdb.cursor-byok.composer.bak`
 before writing and commits the updates in one transaction.
 
+The model catalog proxy persists the last complete merged `AvailableModels` body
+under the app data directory and replays it when the upstream fails. Never answer
+an upstream failure with a local-only 200: Cursor prunes every hidden model
+missing from a successful catalog response, so a partial response silently
+resets the user's model visibility choices.
+
 ### Diagnostics
 
 Capture only terminal failures: run outcomes, sync errors, Cursor stop/launch
