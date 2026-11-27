@@ -78,8 +78,8 @@ pub(crate) fn breakdown(
     }
 
     let mut estimates = [0_u64; 8];
-    for index in 0..CONVERSATION {
-        estimates[index] = measures[index].estimated_tokens();
+    for (index, estimate) in estimates.iter_mut().enumerate() {
+        *estimate = measures[index].estimated_tokens();
     }
     if measures[SUMMARY].characters != 0 {
         estimates[SUMMARY] = measures[SUMMARY].estimated_tokens();
@@ -93,10 +93,7 @@ pub(crate) fn breakdown(
         estimates[SUMMARY] = summary.estimated_tokens as u64;
     }
     let easter_egg_tokens = 1_u64;
-    let categorized_tokens = used_tokens as u64;
-    fit_special_estimates(&mut estimates, categorized_tokens);
-    estimates[CONVERSATION] =
-        categorized_tokens.saturating_sub(estimates[..CONVERSATION].iter().sum::<u64>());
+    fit_estimates(&mut estimates, used_tokens as u64);
 
     let mut categories = CATEGORIES
         .iter()
@@ -122,13 +119,17 @@ pub(crate) fn breakdown(
     })
 }
 
+/// Charges text to the same eight buckets Cursor renders in
+/// `PromptTokenBreakdownSnapshot`. Request-context sections go to their own
+/// category so projects with many rules and skills show their real cost;
+/// only unmatched text counts as conversation.
 fn measure_message(message: &CanonicalMessage, measures: &mut [Measure; 8]) -> Result<()> {
     match &message.content {
         MessageContent::Parts { parts } => {
             for part in parts {
                 if let ContentPart::Text { text } = part {
-                    if message.origin == Origin::Runtime {
-                        measure_runtime(text, measures);
+                    if is_section_message(message) {
+                        measure_sections(text, measures);
                     } else {
                         measures[CONVERSATION].add(text);
                     }
@@ -152,10 +153,17 @@ fn measure_message(message: &CanonicalMessage, measures: &mut [Measure; 8]) -> R
     Ok(())
 }
 
-fn measure_runtime(text: &str, measures: &mut [Measure; 8]) {
+/// Messages whose text carries independently attributable sections: the
+/// per-turn runtime message and the append-only request context.
+fn is_section_message(message: &CanonicalMessage) -> bool {
+    message.origin == Origin::Runtime || message.message_id.starts_with("request-context:")
+}
+
+fn measure_sections(text: &str, measures: &mut [Measure; 8]) {
     let mut ranges = Vec::new();
     collect_ranges(text, "rules", RULES, &mut ranges);
     collect_ranges(text, "rule", RULES, &mut ranges);
+    collect_ranges(text, "agent_rules", RULES, &mut ranges);
     collect_ranges(text, "agent_skills", SKILLS, &mut ranges);
     collect_ranges(text, "skill", SKILLS, &mut ranges);
     collect_ranges(text, "subagents", SUBAGENTS, &mut ranges);
@@ -193,27 +201,383 @@ fn collect_ranges(text: &str, tag: &str, category: usize, output: &mut Vec<(usiz
     }
 }
 
-fn fit_special_estimates(estimates: &mut [u64; 8], total: u64) {
-    let special_total = estimates[..CONVERSATION].iter().sum::<u64>();
-    if special_total <= total || special_total == 0 {
+/// Fits the measured category estimates to the token count the provider
+/// charged.
+///
+/// The character-based estimate runs behind provider tokenizers on CJK and
+/// XML-heavy context, so the measured total is usually below `used_tokens`.
+/// Scaling every category keeps that shortfall spread over the sections that
+/// produced it; charging it to the conversation would report tens of thousands
+/// of conversation tokens for a first turn whose visible messages are tiny.
+fn fit_estimates(estimates: &mut [u64; 8], total: u64) {
+    let measured = estimates.iter().copied().sum::<u64>();
+    if measured == 0 {
+        estimates[CONVERSATION] = total;
         return;
     }
-    let original = *estimates;
-    let mut assigned = 0;
-    for index in 0..CONVERSATION {
-        estimates[index] = original[index].saturating_mul(total) / special_total;
-        assigned += estimates[index];
+    if measured == total {
+        return;
     }
-    let mut remainder = total - assigned;
-    let mut order = (0..CONVERSATION).collect::<Vec<_>>();
+    let scaled = estimates
+        .iter()
+        .map(|estimate| (u128::from(*estimate) * u128::from(total) / u128::from(measured)) as u64)
+        .collect::<Vec<u64>>();
+    let assigned = scaled.iter().copied().sum::<u64>();
+    let mut remainder = total.saturating_sub(assigned);
+    let mut order = (0..estimates.len()).collect::<Vec<usize>>();
     order.sort_by_key(|index| {
-        std::cmp::Reverse(original[*index].saturating_mul(total) % special_total)
+        std::cmp::Reverse(
+            (u128::from(estimates[*index]) * u128::from(total) % u128::from(measured)) as u64,
+        )
     });
+    *estimates = scaled.try_into().expect("one estimate per category");
     for index in order {
         if remainder == 0 {
             break;
         }
         estimates[index] += 1;
         remainder -= 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::model::{CanonicalMessage, Origin, Role, ToolDefinition};
+
+    fn category<'a>(
+        snapshot: &'a pb::PromptTokenBreakdownSnapshot,
+        id: &str,
+    ) -> &'a pb::PromptTokenBreakdownCategory {
+        snapshot
+            .categories
+            .iter()
+            .find(|category| category.id == id)
+            .unwrap_or_else(|| panic!("missing category {id}"))
+    }
+
+    fn characters(snapshot: &pb::PromptTokenBreakdownSnapshot, id: &str) -> Option<u32> {
+        category(snapshot, id).character_count
+    }
+
+    fn tokens(snapshot: &pb::PromptTokenBreakdownSnapshot, id: &str) -> u32 {
+        category(snapshot, id).estimated_tokens
+    }
+
+    const RULES: &str = "<rules><user_rule>RULE</user_rule></rules>";
+    const AGENT_RULES: &str =
+        "<agent_rules>not loaded<agent_rule fullPath=\"x\" description=\"y\"/></agent_rules>";
+    const SKILLS: &str = "<agent_skills><available_skills><agent_skill fullPath=\"s\">desc</agent_skill></available_skills></agent_skills>";
+    const SUBAGENTS: &str = "<subagents><subagent name=\"a\">d</subagent></subagents>";
+    const MCP: &str =
+        "<mcp_meta_tools><mcp_meta_tool_server name=\"s\" identifier=\"i\"/></mcp_meta_tools>";
+    const ENV: &str = "<user_info>env</user_info>";
+
+    #[test]
+    fn request_context_sections_are_attributed_to_their_categories() {
+        let text = [ENV, RULES, AGENT_RULES, SKILLS, SUBAGENTS, MCP].join("\n\n");
+        let separators = 2 * 5;
+        let message =
+            CanonicalMessage::text("request-context:test", Role::User, Origin::Prompt, text);
+
+        let snapshot =
+            breakdown(20_000, 500_000, None, "", &[], &HashSet::new(), &[message]).unwrap();
+
+        assert_eq!(
+            characters(&snapshot, "rules"),
+            Some((RULES.len() + AGENT_RULES.len()) as u32),
+            "the agent-decided rule catalog belongs to Rules"
+        );
+        assert_eq!(characters(&snapshot, "skills"), Some(SKILLS.len() as u32));
+        assert_eq!(
+            characters(&snapshot, "subagents"),
+            Some(SUBAGENTS.len() as u32)
+        );
+        assert_eq!(characters(&snapshot, "mcp"), Some(MCP.len() as u32));
+        assert_eq!(
+            characters(&snapshot, "conversation"),
+            Some((ENV.len() + separators) as u32),
+            "environment blocks and section separators stay in Conversation"
+        );
+        assert!(tokens(&snapshot, "rules") > 0);
+        assert!(tokens(&snapshot, "skills") > 0);
+        assert!(tokens(&snapshot, "subagents") > 0);
+        assert!(tokens(&snapshot, "mcp") > 0);
+
+        let total = CATEGORIES
+            .iter()
+            .map(|(id, _)| tokens(&snapshot, id))
+            .sum::<u32>();
+        assert_eq!(total, 20_000, "categories add up to the provider count");
+        assert!(
+            tokens(&snapshot, "conversation") < tokens(&snapshot, "skills"),
+            "the tiny environment block must not absorb the provider overhead"
+        );
+    }
+
+    #[test]
+    fn a_large_catalog_does_not_turn_into_conversation_tokens() {
+        let catalog = "<agent_skill fullPath=\"/s/SKILL.md\">描述</agent_skill>".repeat(200);
+        let text = format!("{ENV}\n\n<agent_skills>\n<available_skills>\n{catalog}\n</available_skills>\n</agent_skills>");
+        let message =
+            CanonicalMessage::text("request-context:test", Role::User, Origin::Prompt, text);
+        let user = CanonicalMessage::text("user", Role::User, Origin::User, "question");
+
+        let snapshot = breakdown(
+            60_000,
+            500_000,
+            None,
+            "",
+            &[],
+            &HashSet::new(),
+            &[message, user],
+        )
+        .unwrap();
+
+        assert!(
+            tokens(&snapshot, "conversation") < 1_000,
+            "only the visible messages belong to the conversation"
+        );
+        assert!(tokens(&snapshot, "skills") > 50_000);
+        let total = CATEGORIES
+            .iter()
+            .map(|(id, _)| tokens(&snapshot, id))
+            .sum::<u32>();
+        assert_eq!(total, 60_000);
+    }
+
+    #[test]
+    fn runtime_sections_keep_being_attributed() {
+        let message = CanonicalMessage::text("runtime:event", Role::User, Origin::Runtime, RULES);
+
+        let snapshot =
+            breakdown(5_000, 500_000, None, "", &[], &HashSet::new(), &[message]).unwrap();
+
+        assert_eq!(characters(&snapshot, "rules"), Some(RULES.len() as u32));
+        assert_eq!(characters(&snapshot, "conversation"), None);
+    }
+
+    #[test]
+    fn plain_user_text_is_conversation_even_with_section_tags() {
+        let message = CanonicalMessage::text("user", Role::User, Origin::User, RULES);
+
+        let snapshot =
+            breakdown(5_000, 500_000, None, "", &[], &HashSet::new(), &[message]).unwrap();
+
+        assert_eq!(characters(&snapshot, "rules"), None);
+        assert_eq!(
+            characters(&snapshot, "conversation"),
+            Some(RULES.len() as u32)
+        );
+    }
+
+    #[test]
+    fn dynamic_mcp_tools_are_separated_from_static_tools() {
+        let dynamic = ToolDefinition {
+            name: "mcp__browser".into(),
+            description: "drive the browser".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        let dynamic_chars = serde_json::to_string(&dynamic)
+            .unwrap()
+            .encode_utf16()
+            .count() as u32;
+        let static_tool = ToolDefinition {
+            name: "Read".into(),
+            description: "read a file".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        let static_chars = serde_json::to_string(&static_tool)
+            .unwrap()
+            .encode_utf16()
+            .count() as u32;
+        let dynamic_names = HashSet::from(["mcp__browser".to_string()]);
+
+        let snapshot = breakdown(
+            1_000,
+            100_000,
+            None,
+            "sys",
+            &[dynamic, static_tool],
+            &dynamic_names,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(characters(&snapshot, "system_prompt"), Some(3));
+        assert_eq!(characters(&snapshot, "mcp"), Some(dynamic_chars));
+        assert_eq!(characters(&snapshot, "tools"), Some(static_chars));
+    }
+
+    fn request_context(text: impl Into<String>) -> CanonicalMessage {
+        CanonicalMessage::text("request-context:test", Role::User, Origin::Prompt, text)
+    }
+
+    #[test]
+    fn malformed_sections_fall_back_to_conversation() {
+        for text in [
+            "<rules><user_rule>UNCLOSED",
+            "</rules>stray closing tag",
+            "<rules>one",
+            "<agent_skills",
+            "<mcp_meta_tools><mcp_tool>",
+        ] {
+            let snapshot = breakdown(
+                1_000,
+                100_000,
+                None,
+                "",
+                &[],
+                &HashSet::new(),
+                &[request_context(text)],
+            )
+            .unwrap();
+            assert_eq!(
+                characters(&snapshot, "conversation"),
+                Some(text.encode_utf16().count() as u32),
+                "unclosed or stray tags stay in Conversation: {text:?}"
+            );
+            assert_eq!(characters(&snapshot, "rules"), None, "{text:?}");
+            assert_eq!(characters(&snapshot, "skills"), None, "{text:?}");
+            assert_eq!(characters(&snapshot, "mcp"), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn nested_sections_count_once_for_the_outer_category() {
+        let text = "<rules><agent_skills>nested</agent_skills></rules>";
+        let snapshot = breakdown(
+            1_000,
+            100_000,
+            None,
+            "",
+            &[],
+            &HashSet::new(),
+            &[request_context(text)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            characters(&snapshot, "rules"),
+            Some(text.encode_utf16().count() as u32)
+        );
+        assert_eq!(
+            characters(&snapshot, "skills"),
+            None,
+            "overlapping ranges do not double count"
+        );
+    }
+
+    #[test]
+    fn sections_with_attributes_are_recognized() {
+        let text = "<agent_skills source=\"x\">desc</agent_skills>";
+        let snapshot = breakdown(
+            1_000,
+            100_000,
+            None,
+            "",
+            &[],
+            &HashSet::new(),
+            &[request_context(text)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            characters(&snapshot, "skills"),
+            Some(text.encode_utf16().count() as u32)
+        );
+    }
+
+    #[test]
+    fn empty_sections_still_belong_to_their_category() {
+        let text = "<rules></rules>";
+        let snapshot = breakdown(
+            1_000,
+            100_000,
+            None,
+            "",
+            &[],
+            &HashSet::new(),
+            &[request_context(text)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            characters(&snapshot, "rules"),
+            Some(text.encode_utf16().count() as u32)
+        );
+        assert!(tokens(&snapshot, "rules") > 0);
+    }
+
+    #[test]
+    fn every_text_part_is_measured_independently() {
+        let message = CanonicalMessage::parts(
+            "request-context:test",
+            Role::User,
+            Origin::Prompt,
+            vec![
+                ContentPart::Text {
+                    text: "<rules>A</rules>".into(),
+                },
+                ContentPart::Text {
+                    text: "plain".into(),
+                },
+            ],
+        );
+        let snapshot =
+            breakdown(1_000, 100_000, None, "", &[], &HashSet::new(), &[message]).unwrap();
+
+        assert_eq!(characters(&snapshot, "rules"), Some(16));
+        assert_eq!(characters(&snapshot, "conversation"), Some(5));
+    }
+
+    #[test]
+    fn assistant_text_is_conversation_even_with_section_tags() {
+        let message = CanonicalMessage {
+            message_id: "assistant".into(),
+            role: Role::Assistant,
+            origin: Origin::Assistant,
+            content: MessageContent::Assistant {
+                text: "<rules>assistant text</rules>".into(),
+                thinking: String::new(),
+                tool_round_id: None,
+                replay_state: None,
+                tool_calls: Vec::new(),
+            },
+            runtime_event_id: None,
+        };
+        let text = "<rules>assistant text</rules>";
+        let snapshot =
+            breakdown(1_000, 100_000, None, "", &[], &HashSet::new(), &[message]).unwrap();
+
+        assert_eq!(characters(&snapshot, "rules"), None);
+        assert_eq!(
+            characters(&snapshot, "conversation"),
+            Some((text.encode_utf16().count() + 2) as u32),
+            "assistant text plus the serialized empty tool-call list"
+        );
+    }
+
+    #[test]
+    fn unicode_sections_are_measured_by_utf16_width() {
+        let text = "<rules>规则</rules>";
+        let snapshot = breakdown(
+            1_000,
+            100_000,
+            None,
+            "",
+            &[],
+            &HashSet::new(),
+            &[request_context(text)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            characters(&snapshot, "rules"),
+            Some(text.encode_utf16().count() as u32)
+        );
+        assert!(tokens(&snapshot, "rules") > 0);
     }
 }

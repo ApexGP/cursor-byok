@@ -193,6 +193,9 @@ async fn compile_with_timestamp(
     compiler: &PromptCompiler,
     blobs: &BlobSynchronizer,
 ) -> Result<CanonicalMessage> {
+    let attached_rules =
+        context::attached_context(request_context, &context::turn_files(request_context, user))
+            .unwrap_or_default();
     let mut values = BTreeMap::from([
         ("OPEN_FILES", section(open_files(user))),
         (
@@ -204,6 +207,7 @@ async fn compile_with_timestamp(
                     .unwrap_or_default(),
             ),
         ),
+        ("ATTACHED_RULES", section(attached_rules)),
         ("ACTION_CONTEXT", section(action_context.to_string())),
         ("TIMESTAMP", timestamp),
         ("USER_QUERY", user.text.clone()),
@@ -229,6 +233,7 @@ pub(super) fn compile_request_context(
     event_id: &str,
     request_context: &pb::RequestContext,
     history: &[CanonicalMessage],
+    context_window_tokens: Option<u64>,
 ) -> Result<Option<CanonicalMessage>> {
     let time = Time::now(
         request_context
@@ -236,7 +241,7 @@ pub(super) fn compile_request_context(
             .as_ref()
             .map(|env| env.time_zone.as_str()),
     )?;
-    let text = context::compile_context(request_context, &time.today);
+    let text = context::compile_context(request_context, &time.today, context_window_tokens);
     if text.is_empty() {
         return Ok(None);
     }
@@ -310,16 +315,7 @@ fn section(value: String) -> String {
 }
 
 fn open_files(user: &pb::UserMessage) -> String {
-    let Some(ide) = user
-        .selected_context
-        .as_ref()
-        .and_then(|selected| selected.invocation_context.as_ref())
-        .and_then(|invocation| invocation.data.as_ref())
-        .and_then(|data| match data {
-            pb::invocation_context::Data::IdeState(ide) => Some(ide),
-            _ => None,
-        })
-    else {
+    let Some(ide) = context::ide_state(user) else {
         return String::new();
     };
     if ide.visible_files.is_empty() && ide.recently_viewed_files.is_empty() {

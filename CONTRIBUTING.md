@@ -99,6 +99,7 @@ cursor-byok/
 │   │   │   ├── transport/         # request_id routing and ordered output
 │   │   │   ├── conversation/      # conversation actor, runs, message delivery
 │   │   │   ├── compile/           # action, message, context, model compilation
+│   │   │   │   └── context/       # request context, rules, globs, per-turn attachment
 │   │   │   ├── checkpoint/        # durable conversation state
 │   │   │   ├── tools/             # dispatch, wire codec, completion gate
 │   │   │   ├── protocol/          # framing and server events

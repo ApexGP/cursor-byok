@@ -1,4 +1,9 @@
 //! Compiles rules, skills, MCP metadata, and environment context.
+mod globs;
+mod rules;
+mod skills;
+mod turn;
+
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::Path,
@@ -16,6 +21,11 @@ use crate::{
     store::BlobId,
     Error, Result,
 };
+
+pub(crate) use turn::{attached_context, ide_state, turn_files};
+
+/// Tells the model that catalogued agent-decided rules still need a read.
+const AGENT_RULES_INSTRUCTION: &str = "Rules below are not loaded. When a rule description matches the current task, read the file at its fullPath before continuing.";
 
 pub async fn hydrate(
     request: &pb::AgentRunRequest,
@@ -194,7 +204,11 @@ pub fn request_context(request: &pb::AgentRunRequest) -> Option<&pb::RequestCont
         })
 }
 
-pub fn compile_context(context: &pb::RequestContext, today: &str) -> String {
+pub fn compile_context(
+    context: &pb::RequestContext,
+    today: &str,
+    context_window_tokens: Option<u64>,
+) -> String {
     let mut sections = Vec::new();
     let mut transcripts = None;
     if let Some(env) = &context.env {
@@ -227,49 +241,50 @@ pub fn compile_context(context: &pb::RequestContext, today: &str) -> String {
         )
     }));
     sections.extend(transcripts);
-    let skill_contents = context
-        .agent_skills
-        .iter()
-        .map(|skill| skill.content.as_str())
-        .filter(|content| !content.is_empty())
-        .collect::<HashSet<_>>();
-    let mut rules = context
-        .rules
-        .iter()
-        .chain(context.non_file_rules.iter())
-        .filter(|rule| {
-            !rule.content.trim().is_empty()
-                && !is_skill_rule(rule)
-                && !skill_contents.contains(rule.content.as_str())
-        })
-        .map(|rule| format!("<user_rule>\n{}\n</user_rule>", rule.content))
-        .collect::<Vec<_>>();
-    rules.extend(
+    let skill_index = rules::SkillIndex::new(context);
+    let mut rule_bodies = Vec::new();
+    let mut catalogs = Vec::new();
+    let mut catalogued = HashSet::new();
+    for rule in context.rules.iter().chain(context.non_file_rules.iter()) {
+        if skill_index.covers(rule) {
+            continue;
+        }
+        match rules::rule_kind(rule) {
+            rules::RuleKind::Always => rules::push_rule_content(&mut rule_bodies, rule),
+            rules::RuleKind::AgentFetched { description } => {
+                if description.trim().is_empty() || rule.full_path.trim().is_empty() {
+                    rules::push_rule_content(&mut rule_bodies, rule);
+                    continue;
+                }
+                if catalogued.insert(rule.full_path.as_str()) {
+                    catalogs.push(format!(
+                        "<agent_rule fullPath=\"{}\" description=\"{}\"/>",
+                        xml(&rule.full_path),
+                        xml(description.trim()),
+                    ));
+                }
+            }
+            rules::RuleKind::Globbed { .. } | rules::RuleKind::Manual => {}
+        }
+    }
+    rule_bodies.extend(
         context
             .cloud_rule
             .iter()
             .map(|rule| format!("<user_rule>\n{rule}\n</user_rule>")),
     );
-    if !rules.is_empty() {
-        sections.push(format!("<rules>\n{}\n</rules>", rules.join("\n")));
+    if !rule_bodies.is_empty() {
+        sections.push(format!("<rules>\n{}\n</rules>", rule_bodies.join("\n")));
     }
-    let skills = context
-        .agent_skills
-        .iter()
-        .filter(|skill| !skill.disable_model_invocation)
-        .map(|skill| {
-            format!(
-                "<agent_skill fullPath=\"{}\">{}</agent_skill>",
-                xml(&skill.full_path),
-                xml(&skill.description),
-            )
-        })
-        .collect::<Vec<_>>();
-    if !skills.is_empty() {
+    if !catalogs.is_empty() {
         sections.push(format!(
-            "<agent_skills>\n<available_skills>\n{}\n</available_skills>\n</agent_skills>",
-            skills.join("\n")
+            "<agent_rules>\n{}\n{}\n</agent_rules>",
+            AGENT_RULES_INSTRUCTION,
+            catalogs.join("\n")
         ));
+    }
+    if let Some(section) = skills::section(context, context_window_tokens) {
+        sections.push(section);
     }
     let subagents = context
         .custom_subagents
@@ -400,11 +415,12 @@ pub fn meta_mcp_routes(context: &pb::RequestContext) -> HashMap<(String, String)
         .collect()
 }
 
-fn is_skill_rule(rule: &pb::CursorRule) -> bool {
-    Path::new(&rule.full_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
+fn xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 pub fn selected_context(user: &pb::UserMessage) -> Option<String> {
@@ -575,24 +591,13 @@ fn prost_value(value: &prost_types::Value) -> Value {
     }
 }
 
-fn xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
+#[cfg(test)]
+mod testing;
 
 #[cfg(test)]
 mod tests {
+    use super::testing::{rule, skill, typed_rule};
     use super::*;
-
-    fn rule(content: &str) -> pb::CursorRule {
-        pb::CursorRule {
-            content: content.into(),
-            ..Default::default()
-        }
-    }
 
     #[test]
     fn merge_local_rules_appends_and_dedupes_by_content() {
@@ -625,5 +630,304 @@ mod tests {
         let mut context = pb::RequestContext::default();
         merge_local_rules(&mut context, &directory.path().join("nested/rules"));
         assert!(context.non_file_rules.is_empty());
+    }
+
+    #[test]
+    fn merge_local_rules_survives_malformed_files() {
+        let broken = tempfile::tempdir().unwrap();
+        std::fs::write(broken.path().join("bad.md"), [0xff, 0xfe, 0x00]).unwrap();
+        let mut context = pb::RequestContext {
+            non_file_rules: vec![rule("ide rule")],
+            ..Default::default()
+        };
+        merge_local_rules(&mut context, broken.path());
+        assert_eq!(
+            context
+                .non_file_rules
+                .iter()
+                .map(|rule| rule.content.as_str())
+                .collect::<Vec<_>>(),
+            ["ide rule"],
+            "a non-UTF-8 file aborts the local merge without dropping IDE rules"
+        );
+
+        let mixed = tempfile::tempdir().unwrap();
+        std::fs::write(mixed.path().join("bad name.md"), "skipped").unwrap();
+        std::fs::write(mixed.path().join("good.md"), "local rule").unwrap();
+        let mut context = pb::RequestContext::default();
+        merge_local_rules(&mut context, mixed.path());
+        assert_eq!(
+            context
+                .non_file_rules
+                .iter()
+                .map(|rule| rule.content.as_str())
+                .collect::<Vec<_>>(),
+            ["local rule"],
+            "an invalid file name is skipped without hiding valid rules"
+        );
+    }
+
+    #[test]
+    fn compile_context_separates_always_catalog_and_globbed_rules() {
+        let context = pb::RequestContext {
+            rules: vec![
+                typed_rule(
+                    "ALWAYS BODY",
+                    pb::cursor_rule_type::Type::Global(pb::CursorRuleTypeGlobal::default()),
+                ),
+                typed_rule(
+                    "AGENT BODY",
+                    pb::cursor_rule_type::Type::AgentFetched(pb::CursorRuleTypeAgentFetched {
+                        description: "API conventions".into(),
+                    }),
+                ),
+                typed_rule(
+                    "RUST BODY",
+                    pb::cursor_rule_type::Type::FileGlobbed(pb::CursorRuleTypeFileGlobs {
+                        globs: vec!["src/**/*.rs".into()],
+                    }),
+                ),
+                typed_rule(
+                    "MANUAL BODY",
+                    pb::cursor_rule_type::Type::ManuallyAttached(
+                        pb::CursorRuleTypeManuallyAttached::default(),
+                    ),
+                ),
+            ],
+            agent_skills: vec![
+                skill("SKILL.md", "general skill", "SKILL BODY", &[]),
+                skill("scoped/SKILL.md", "ts skill", "TS BODY", &["**/*.ts"]),
+            ],
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        assert!(text.contains("<user_rule>\nALWAYS BODY\n</user_rule>"));
+        assert!(text.contains(
+            "<agent_rule fullPath=\"/repo/.cursor/rules/rule.mdc\" description=\"API conventions\"/>"
+        ));
+        assert!(text.contains(AGENT_RULES_INSTRUCTION));
+        assert!(!text.contains("AGENT BODY"), "{text}");
+        assert!(!text.contains("RUST BODY"), "{text}");
+        assert!(!text.contains("MANUAL BODY"), "{text}");
+        assert!(text.contains("<agent_skill fullPath=\"SKILL.md\" />"));
+        assert!(!text.contains("fullPath=\"scoped/SKILL.md\""), "{text}");
+    }
+
+    #[test]
+    fn compile_context_explains_agent_decided_rules() {
+        let context = pb::RequestContext {
+            rules: vec![typed_rule(
+                "AGENT BODY",
+                pb::cursor_rule_type::Type::AgentFetched(pb::CursorRuleTypeAgentFetched {
+                    description: "API conventions".into(),
+                }),
+            )],
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        assert!(
+            text.contains("<agent_rules>\nRules below are not loaded."),
+            "{text}"
+        );
+        assert!(
+            text.contains("read the file at its fullPath before continuing"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn compile_context_omits_the_agent_rule_catalog_without_agent_rules() {
+        let context = pb::RequestContext {
+            rules: vec![typed_rule(
+                "ALWAYS BODY",
+                pb::cursor_rule_type::Type::Global(pb::CursorRuleTypeGlobal::default()),
+            )],
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        assert!(!text.contains("<agent_rules>"), "{text}");
+    }
+
+    #[test]
+    fn skill_backed_rules_are_projected_once() {
+        let context = pb::RequestContext {
+            rules: vec![pb::CursorRule {
+                full_path: "/repo/.agents/skills/tdd/SKILL.md".into(),
+                content: "SKILL BODY".into(),
+                ..Default::default()
+            }],
+            agent_skills: vec![skill(
+                "/repo/.agents/skills/tdd/SKILL.md",
+                "tdd skill",
+                "SKILL BODY",
+                &[],
+            )],
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        assert!(
+            text.contains("<agent_skill fullPath=\"$0/tdd/SKILL.md\" />"),
+            "{text}"
+        );
+        assert!(!text.contains("<user_rule>"), "{text}");
+    }
+
+    #[test]
+    fn rules_sharing_skill_content_are_projected_once() {
+        let context = pb::RequestContext {
+            rules: vec![pb::CursorRule {
+                full_path: "/repo/.cursor/rules/duplicate.mdc".into(),
+                content: "SKILL BODY".into(),
+                ..Default::default()
+            }],
+            agent_skills: vec![skill(
+                "/repo/.agents/skills/tdd/SKILL.md",
+                "tdd skill",
+                "SKILL BODY",
+                &[],
+            )],
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        assert!(
+            text.contains("<agent_skill fullPath=\"$0/tdd/SKILL.md\" />"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("<user_rule>"),
+            "identical content is projected through the skill entry only: {text}"
+        );
+    }
+
+    #[test]
+    fn compile_context_escapes_rule_and_skill_attributes() {
+        let mut rule = typed_rule(
+            "AGENT BODY",
+            pb::cursor_rule_type::Type::AgentFetched(pb::CursorRuleTypeAgentFetched {
+                description: "x & y \"z\" <q>".into(),
+            }),
+        );
+        rule.full_path = "/repo/a&b\"c<d>.mdc".into();
+        let context = pb::RequestContext {
+            rules: vec![rule],
+            agent_skills: vec![skill(
+                "/repo/s&k\"<1>/SKILL.md",
+                "d & \"q\" <x>",
+                "SKILL",
+                &[],
+            )],
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        assert!(
+            text.contains("fullPath=\"/repo/a&amp;b&quot;c&lt;d&gt;.mdc\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("description=\"x &amp; y &quot;z&quot; &lt;q&gt;\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("fullPath=\"/repo/s&amp;k&quot;&lt;1&gt;/SKILL.md\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("fullPath=\"/repo/s&amp;k&quot;&lt;1&gt;/SKILL.md\" />"),
+            "user skills keep their path without a description: {text}"
+        );
+    }
+
+    #[test]
+    fn malformed_agent_rules_stay_inline() {
+        let mut empty_description = typed_rule(
+            "EMPTY DESCRIPTION",
+            pb::cursor_rule_type::Type::AgentFetched(pb::CursorRuleTypeAgentFetched {
+                description: "   ".into(),
+            }),
+        );
+        empty_description.full_path = "/repo/empty.mdc".into();
+        let mut missing_path = typed_rule(
+            "MISSING PATH",
+            pb::cursor_rule_type::Type::AgentFetched(pb::CursorRuleTypeAgentFetched {
+                description: "has description".into(),
+            }),
+        );
+        missing_path.full_path.clear();
+        let context = pb::RequestContext {
+            rules: vec![empty_description, missing_path],
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        assert!(
+            text.contains("<user_rule>\nEMPTY DESCRIPTION\n</user_rule>"),
+            "{text}"
+        );
+        assert!(
+            text.contains("<user_rule>\nMISSING PATH\n</user_rule>"),
+            "{text}"
+        );
+        assert!(!text.contains("<agent_rules>"), "{text}");
+    }
+
+    #[test]
+    fn agent_decided_rules_are_catalogued_once_per_path() {
+        let first = typed_rule(
+            "FIRST BODY",
+            pb::cursor_rule_type::Type::AgentFetched(pb::CursorRuleTypeAgentFetched {
+                description: "first description".into(),
+            }),
+        );
+        let mut second = typed_rule(
+            "SECOND BODY",
+            pb::cursor_rule_type::Type::AgentFetched(pb::CursorRuleTypeAgentFetched {
+                description: "second description".into(),
+            }),
+        );
+        second.full_path = first.full_path.clone();
+        let context = pb::RequestContext {
+            rules: vec![first, second],
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        assert_eq!(text.matches("<agent_rule ").count(), 1, "{text}");
+        assert!(text.contains("description=\"first description\""), "{text}");
+        assert!(!text.contains("second description"), "{text}");
+    }
+
+    #[test]
+    fn blank_rule_bodies_are_skipped() {
+        let context = pb::RequestContext {
+            rules: vec![rule("   "), rule("\n\t")],
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        assert!(!text.contains("<rules>"), "{text}");
+        assert!(!text.contains("<user_rule>"), "{text}");
+    }
+
+    #[test]
+    fn compile_context_orders_rules_before_skills() {
+        let context = pb::RequestContext {
+            rules: vec![typed_rule(
+                "ALWAYS BODY",
+                pb::cursor_rule_type::Type::Global(pb::CursorRuleTypeGlobal::default()),
+            )],
+            agent_skills: vec![skill("s/SKILL.md", "a skill", "SKILL", &[])],
+            ..Default::default()
+        };
+
+        let text = compile_context(&context, "2026-11-24", None);
+        let rules = text.find("<rules>").expect("rules section");
+        let skills = text.find("<agent_skills>").expect("skills section");
+        assert!(rules < skills, "{text}");
     }
 }

@@ -1,4 +1,4 @@
-{{OPEN_FILES}}{{SELECTED_CONTEXT}}{{ACTION_CONTEXT}}<system_reminder>
+{{OPEN_FILES}}{{SELECTED_CONTEXT}}{{ATTACHED_RULES}}{{ACTION_CONTEXT}}<system_reminder>
 You are now in Ask mode. You have EXITED your previous mode. Continue with the task in the new mode.
 </system_reminder>
 
