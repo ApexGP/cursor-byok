@@ -598,12 +598,12 @@ async fn start_generation(
     let (runtime_actions, runtime_action_receiver) =
         mpsc::unbounded_channel::<compile::RuntimeAction>();
     let tool_runtime = tool_runtime_factory.next_run();
-    let goal = GoalHandle::new(
+    let goal = GoalHandle::for_generation(
+        previous_goal,
         request
             .conversation_state
             .as_ref()
-            .and_then(|state| state.goal_state.clone())
-            .or_else(|| previous_goal.and_then(|goal| goal.snapshot())),
+            .and_then(|state| state.goal_state.clone()),
     );
     let tools = ToolDispatcher::with_results(
         tool_runtime.clone(),

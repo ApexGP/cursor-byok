@@ -51,6 +51,13 @@ impl GoalHandle {
         }
     }
 
+    /// Reuses the previous handle for a continuation so its creation time and
+    /// accounting survive the new generation; a fresh generation starts from
+    /// the goal state the client sent.
+    pub fn for_generation(previous: Option<Self>, state: Option<pb::GoalState>) -> Self {
+        previous.unwrap_or_else(|| Self::new(state))
+    }
+
     pub fn snapshot(&self) -> Option<pb::GoalState> {
         self.state.lock().clone()
     }
@@ -513,6 +520,33 @@ mod tests {
         // A different Tool call is a different goal.
         goal.create(CONVERSATION, None, "Ship", "call-2", 9_000);
         assert_eq!(goal.created_at_ms(), Some(9_000));
+    }
+
+    #[test]
+    fn a_continuation_generation_reuses_the_existing_handle() {
+        let goal = created();
+        let continued = GoalHandle::for_generation(Some(goal.clone()), None);
+        assert_eq!(continued.created_at_ms(), Some(1_000));
+        assert!(matches!(
+            continued.begin_continuation(CONVERSATION, None, 1_500),
+            Continuation::Continue(_)
+        ));
+        assert_eq!(
+            goal.snapshot().unwrap().continuation_count,
+            1,
+            "the continuation must share the previous handle"
+        );
+    }
+
+    #[test]
+    fn a_fresh_generation_reads_the_client_goal_state() {
+        let state = pb::GoalState {
+            goal_id: "client-goal".into(),
+            ..Default::default()
+        };
+        let goal = GoalHandle::for_generation(None, Some(state));
+        assert_eq!(goal.snapshot().unwrap().goal_id, "client-goal");
+        assert_eq!(goal.created_at_ms(), None);
     }
 
     #[test]
