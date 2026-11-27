@@ -69,11 +69,7 @@ pub fn overrides(
 }
 
 pub fn subagent_kind(value: &str) -> SubagentKind {
-    if value == "generalPurpose" {
-        SubagentKind::GeneralPurpose
-    } else {
-        SubagentKind::Named(value.into())
-    }
+    SubagentKind::from_task_type(value)
 }
 
 fn from_requested(

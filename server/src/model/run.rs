@@ -12,6 +12,16 @@ pub enum SubagentKind {
     Named(String),
 }
 
+impl SubagentKind {
+    pub fn from_task_type(value: &str) -> Self {
+        if value == "generalPurpose" {
+            Self::GeneralPurpose
+        } else {
+            Self::Named(value.to_string())
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RunKind {
     Root,
