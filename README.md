@@ -43,6 +43,8 @@ Cursor is powerful, but its model choices are tied to the platform. cursor-byok 
 - **Model management:** Add, duplicate, edit, reorder, delete, and batch-test model configurations.
 - **Connection benchmarks:** Measure time to first token, generation speed, total duration, and inspect raw provider responses.
 - **Session metrics:** Track token usage, cache hit rate, conversation turns, and estimated value.
+- **Project context:** Always-on rules stay in the prompt; glob-scoped project rules and Skills attach only when the current turn touches matching files.
+- **Long-running goals:** An active goal continues across turn boundaries and resumes from saved conversation state.
 - **TAB completion options:** Choose the public service, a direct official connection, or a custom TAB service.
 - **Cross-platform:** macOS, Windows, and Linux.
 
@@ -56,6 +58,9 @@ Cursor is powerful, but its model choices are tied to the platform. cursor-byok 
 
 > [!TIP]
 > Cursor reads its proxy and backend configuration at process startup. After the first setup or a Cursor upgrade, a full restart is required. Conversations that were already open will not pick up the new connection.
+
+> [!WARNING]
+> **Cursor 3.32.x is not supported yet.** Its renderer no longer receives the local backend URL, so locally configured models disappear from the picker. Stay on Cursor 3.31.x until Cursor restores the injection; see [issue #8](https://github.com/ApexGP/cursor-byok/issues/8).
 
 ## Model Configuration
 
@@ -144,12 +149,14 @@ cursor-byok/
 │   │   └── src-tauri/    # Tauri desktop lifecycle
 ├── server/
 │   ├── src/
-│   │   ├── cursor/    # Cursor protocol adaptation
+│   │   ├── api/cursor/ # Cursor Connect/protobuf surface
+│   │   ├── cursor/    # Cursor protocol, context projection, tools, goal loop
 │   │   ├── run/       # agent runtime and internal ports
 │   │   ├── provider/  # model provider adapters
 │   │   ├── model/     # domain model
 │   │   ├── store/     # SQLite repositories
 │   │   ├── control/   # management API
+│   │   ├── diagnostics/ # capture, redaction, and issue reports
 │   │   ├── local_app/ # local Cursor integration
 │   │   └── search/    # web and Semble search
 │   ├── prompt/

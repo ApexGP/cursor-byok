@@ -43,6 +43,8 @@ Cursor 很强，但可用的模型通常受限于平台提供的渠道。cursor-
 - **模型管理**：添加、复制、编辑、排序、删除模型配置，并支持批量测试连接。
 - **连接性能测试**：查看首字延迟、生成速度、总耗时和原始服务商响应。
 - **会话指标**：查看 Token 用量、缓存命中率、对话轮次和估算价值。
+- **项目上下文**：始终生效的规则留在提示词中；按 glob 作用域的规则和 Skills 只在当前轮次涉及匹配文件时附加。
+- **长任务目标**：活跃目标可跨轮次继续，并从已保存的会话状态恢复。
 - **TAB 补全服务**：在公益服务、官方直连和自定义服务之间选择连接方式。
 - **跨平台运行**：支持 macOS、Windows 和 Linux。
 
@@ -56,6 +58,9 @@ Cursor 很强，但可用的模型通常受限于平台提供的渠道。cursor-
 
 > [!TIP]
 > Cursor 只在进程启动时读取代理和 backend 配置。首次配置或升级 Cursor 后必须完整重启；已经打开的对话不会加载新的连接。
+
+> [!WARNING]
+> **暂不支持 Cursor 3.32.x。** 该版本的渲染进程不再接收本地 backend 地址，模型列表中不会出现本地配置的模型。请继续使用 Cursor 3.31.x，等待 Cursor 恢复该注入；参见 [issue #8](https://github.com/ApexGP/cursor-byok/issues/8)。
 
 ## 模型配置
 
@@ -144,12 +149,14 @@ cursor-byok/
 │   │   └── src-tauri/    # Tauri 桌面生命周期
 ├── server/
 │   ├── src/
-│   │   ├── cursor/    # Cursor 协议适配
+│   │   ├── api/cursor/ # Cursor Connect/protobuf 接口
+│   │   ├── cursor/    # Cursor 协议、上下文投影、工具与 Goal 循环
 │   │   ├── run/       # 通用 Agent Runtime 与内部 Port
 │   │   ├── provider/  # 模型供应商适配
 │   │   ├── model/     # 聚合领域模型
 │   │   ├── store/     # SQLite Repository
 │   │   ├── control/   # 管理面 API
+│   │   ├── diagnostics/ # 采集、脱敏与 Issue 报告
 │   │   ├── local_app/ # Cursor 本地集成
 │   │   └── search/    # Web 与 Semble 搜索接入
 │   ├── prompt/
