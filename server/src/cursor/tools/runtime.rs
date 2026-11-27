@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use crate::{
     cursor::goal::GoalHandle,
     cursor::protocol::proto::agent::v1 as pb,
-    model::{ModelSpec, ToolCall},
+    model::{ModelSpec, SubagentKind, ToolCall},
     Error, Result,
 };
 
@@ -48,7 +48,7 @@ pub struct ExecContext {
     pub conversation_id: String,
     pub root_conversation_id: String,
     pub default_subagent_model: String,
-    pub subagent_model: Option<SubagentModel>,
+    pub subagent_overrides: Vec<(SubagentKind, SubagentModel)>,
     pub subagent_models: SubagentModelRegistry,
     pub allow_subagents: bool,
     pub subagents_disabled: bool,
@@ -74,11 +74,21 @@ pub enum SubagentModel {
 }
 
 impl ExecContext {
+    fn subagent_override(&self, kind: &SubagentKind) -> Option<&SubagentModel> {
+        self.subagent_overrides
+            .iter()
+            .find_map(|(candidate, selection)| (candidate == kind).then_some(selection))
+    }
+
     pub fn task_disabled(&self, call: &ToolCall) -> bool {
         if !call.name.eq_ignore_ascii_case("Task") {
             return false;
         }
-        self.subagents_disabled || matches!(self.subagent_model, Some(SubagentModel::Disabled))
+        if self.subagents_disabled {
+            return true;
+        }
+        let kind = task_subagent_kind(call);
+        matches!(self.subagent_override(&kind), Some(SubagentModel::Disabled))
     }
 
     pub fn prepare_call(&self, call: &ToolCall) -> Result<ToolCall> {
@@ -96,7 +106,8 @@ impl ExecContext {
         if self.task_disabled(call) {
             return Ok(call.clone());
         }
-        let model = match &self.subagent_model {
+        let selection = self.subagent_override(&task_subagent_kind(call)).cloned();
+        let model = match &selection {
             Some(SubagentModel::Model(model)) => model.model_id.clone(),
             Some(SubagentModel::Disabled) => unreachable!("disabled Task returned above"),
             None => arguments
@@ -117,15 +128,24 @@ impl ExecContext {
             .as_object_mut()
             .expect("Task arguments were validated")
             .insert("model".into(), serde_json::Value::String(model));
-        if let Some(SubagentModel::Model(selection)) = &self.subagent_model {
+        if let Some(SubagentModel::Model(selection)) = selection {
             // The client only receives the model string; keep the selected
             // context/effort/fast variant for the child run keyed by this Task
             // call id. Without this the child falls back to saved defaults.
-            self.subagent_models
-                .remember(&call.call_id, selection.clone());
+            self.subagent_models.remember(&call.call_id, selection);
         }
         Ok(prepared)
     }
+}
+
+fn task_subagent_kind(call: &ToolCall) -> SubagentKind {
+    let subagent_type = call
+        .arguments
+        .as_object()
+        .and_then(|arguments| arguments.get("subagent_type"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("generalPurpose");
+    SubagentKind::from_task_type(subagent_type)
 }
 
 pub(crate) struct PendingInteraction {
@@ -386,14 +406,14 @@ mod subagent_model_tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::model::ModelLatency;
+    use crate::model::{ModelLatency, SubagentKind};
 
-    fn context(subagent_model: Option<SubagentModel>) -> ExecContext {
+    fn context(subagent_overrides: Vec<(SubagentKind, SubagentModel)>) -> ExecContext {
         ExecContext {
             conversation_id: "conversation".into(),
             root_conversation_id: "conversation".into(),
             default_subagent_model: "parent-model".into(),
-            subagent_model,
+            subagent_overrides,
             subagent_models: Default::default(),
             allow_subagents: true,
             subagents_disabled: false,
@@ -405,7 +425,7 @@ mod subagent_model_tests {
         }
     }
 
-    fn task_call() -> ToolCall {
+    fn task_call(subagent_type: &str) -> ToolCall {
         ToolCall {
             index: 0,
             call_id: "call-1".into(),
@@ -415,31 +435,108 @@ mod subagent_model_tests {
             arguments: serde_json::json!({
                 "prompt": "do work",
                 "description": "work",
-                "subagent_type": "generalPurpose",
+                "subagent_type": subagent_type,
             }),
             argument_error: None,
         }
     }
 
+    fn model(model_id: &str, context: u64, effort: &str, latency: ModelLatency) -> ModelSpec {
+        let mut model = ModelSpec::new(model_id);
+        model.context_window_tokens = Some(context);
+        model.reasoning.effort = Some(effort.into());
+        model.reasoning.enabled = true;
+        model.latency = latency;
+        model
+    }
+
     #[test]
-    fn task_call_remembers_the_selected_variant_for_the_child() {
-        let mut selection = ModelSpec::new("model-hash");
-        selection.context_window_tokens = Some(1_000_000);
-        selection.reasoning.effort = Some("max".into());
-        selection.reasoning.enabled = true;
-        selection.latency = ModelLatency::Fast;
-        let context = context(Some(SubagentModel::Model(selection)));
-        let call = task_call();
+    fn task_call_remembers_the_matching_override_for_the_child() {
+        let explore = model("explore-model", 1_000_000, "max", ModelLatency::Fast);
+        let shell = model("shell-model", 200_000, "high", ModelLatency::Standard);
+        let context = context(vec![
+            (
+                SubagentKind::Named("explore".into()),
+                SubagentModel::Model(explore),
+            ),
+            (
+                SubagentKind::Named("shell".into()),
+                SubagentModel::Model(shell),
+            ),
+        ]);
+        let call = task_call("shell");
 
         let prepared = context.prepare_call(&call).expect("prepare Task");
 
-        assert_eq!(prepared.arguments["model"], "model-hash");
+        assert_eq!(prepared.arguments["model"], "shell-model");
         let remembered = context
             .subagent_models
             .get("call-1")
             .expect("variant registered for the child");
-        assert_eq!(remembered.context_window_tokens, Some(1_000_000));
-        assert_eq!(remembered.reasoning.effort.as_deref(), Some("max"));
-        assert_eq!(remembered.latency, ModelLatency::Fast);
+        assert_eq!(remembered.context_window_tokens, Some(200_000));
+        assert_eq!(remembered.reasoning.effort.as_deref(), Some("high"));
+        assert_eq!(remembered.latency, ModelLatency::Standard);
+    }
+
+    #[test]
+    fn an_override_for_another_type_does_not_leak_into_the_task() {
+        let explore = model("explore-model", 1_000_000, "max", ModelLatency::Fast);
+        let context = context(vec![(
+            SubagentKind::Named("explore".into()),
+            SubagentModel::Model(explore),
+        )]);
+        let call = task_call("shell");
+
+        let prepared = context.prepare_call(&call).expect("prepare Task");
+
+        assert_eq!(prepared.arguments["model"], "parent-model");
+        assert!(
+            context.subagent_models.get("call-1").is_none(),
+            "unmatched task must not register another type's variant"
+        );
+    }
+
+    #[test]
+    fn disabled_override_only_blocks_its_own_type() {
+        let context = context(vec![
+            (
+                SubagentKind::Named("explore".into()),
+                SubagentModel::Disabled,
+            ),
+            (
+                SubagentKind::Named("shell".into()),
+                SubagentModel::Model(model(
+                    "shell-model",
+                    200_000,
+                    "high",
+                    ModelLatency::Standard,
+                )),
+            ),
+        ]);
+
+        assert!(!context.task_disabled(&task_call("shell")));
+        assert!(context.task_disabled(&task_call("explore")));
+    }
+
+    #[test]
+    fn general_purpose_uses_the_general_purpose_override() {
+        let general = model("general-model", 128_000, "low", ModelLatency::Standard);
+        let context = context(vec![(
+            SubagentKind::GeneralPurpose,
+            SubagentModel::Model(general),
+        )]);
+        let call = task_call("generalPurpose");
+
+        let prepared = context.prepare_call(&call).expect("prepare Task");
+
+        assert_eq!(prepared.arguments["model"], "general-model");
+        assert_eq!(
+            context
+                .subagent_models
+                .get("call-1")
+                .expect("variant registered")
+                .context_window_tokens,
+            Some(128_000)
+        );
     }
 }

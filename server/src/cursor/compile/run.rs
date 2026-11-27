@@ -160,9 +160,8 @@ pub(crate) async fn prepare(
     }
     let dynamic = context::dynamic_mcp(request, &request_context)?;
     let subagent_model_overrides = model::overrides(request)?;
-    let subagents_disabled = subagent_model_overrides
-        .first()
-        .is_some_and(|(_, selection)| {
+    let subagents_disabled = !subagent_model_overrides.is_empty()
+        && subagent_model_overrides.iter().all(|(_, selection)| {
             matches!(selection, crate::model::SubagentModelOverride::Disabled)
         });
     let mut checkpoint_prompt = compiler.prompt_spec(
@@ -646,11 +645,19 @@ fn exec_context(
     )],
     goal: GoalHandle,
 ) -> Result<ExecContext> {
-    let subagent_model = overrides.first().map(|(_, value)| match value {
-        crate::model::SubagentModelOverride::Explicit(model) => SubagentModel::Model(model.clone()),
-        crate::model::SubagentModelOverride::Inherit => SubagentModel::Model(model.clone()),
-        crate::model::SubagentModelOverride::Disabled => SubagentModel::Disabled,
-    });
+    let subagent_overrides = overrides
+        .iter()
+        .map(|(kind, value)| {
+            let selection = match value {
+                crate::model::SubagentModelOverride::Explicit(model) => {
+                    SubagentModel::Model(model.clone())
+                }
+                crate::model::SubagentModelOverride::Inherit => SubagentModel::Model(model.clone()),
+                crate::model::SubagentModelOverride::Disabled => SubagentModel::Disabled,
+            };
+            (kind.clone(), selection)
+        })
+        .collect();
     Ok(ExecContext {
         conversation_id: conversation_id.to_string(),
         root_conversation_id: request
@@ -658,7 +665,7 @@ fn exec_context(
             .clone()
             .unwrap_or_else(|| conversation_id.to_string()),
         default_subagent_model: model.model_id.clone(),
-        subagent_model,
+        subagent_overrides,
         subagent_models,
         allow_subagents: request.subagent_type_name.is_none() && !subagents_disabled,
         subagents_disabled,
