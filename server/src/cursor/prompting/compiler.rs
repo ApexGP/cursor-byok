@@ -50,6 +50,23 @@ impl PromptCompiler {
         })
     }
 
+    /// Dynamic MCP namespaces need a discovery tool even in modes whose
+    /// captured tool set predates the meta-tool flow.
+    pub fn ensure_mcp_discovery_tool(&self, prompt: &mut PromptSpec) {
+        if prompt.tools.iter().any(|tool| tool.name == "GetMcpTools") {
+            return;
+        }
+        if let Some(tool) = self
+            .assets
+            .mode(Mode::Agent)
+            .tools
+            .iter()
+            .find(|tool| tool.name == "GetMcpTools")
+        {
+            prompt.tools.push(tool.clone());
+        }
+    }
+
     fn tools(&self, mode: Mode, suppress_subagent_progress: bool) -> Vec<ToolDefinition> {
         let mut tools = self.assets.mode(mode).tools.clone();
         if mode == Mode::Subagent && suppress_subagent_progress {

@@ -194,7 +194,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "98bb57a9ade7f1a572c5c5fe77a905a129d28ecfd42b8d318250f6486b09e1ec",
+        "5e94294a3a9926ec118f5760eb0e50fac10b3d94c6dbe8a591b25c5f3280a364",
     );
     assert_mode(
         &assets,
@@ -216,7 +216,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "9a7e0f9e0bd8ef0af01032fa311686f72c42ec260e3057f6fae5e68f5ed36fb8",
+        "3e5bdefc747f21a3b653c373bcd16cf1946d37e87c02052ab1d3d42988a2c84c",
     );
     assert_mode(
         &assets,
@@ -240,7 +240,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "98bb57a9ade7f1a572c5c5fe77a905a129d28ecfd42b8d318250f6486b09e1ec",
+        "5e94294a3a9926ec118f5760eb0e50fac10b3d94c6dbe8a591b25c5f3280a364",
     );
     assert_mode(
         &assets,
@@ -266,7 +266,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "976b309dd91e314d4916439ebb9da8995751d011532e39934a1da7593dc78ccb",
+        "0c092aaa37706945e148bce79a581836d1efbcf93883d8446bf591d323b5637a",
     );
     assert_mode(
         &assets,
@@ -293,7 +293,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
             "SembleSearch",
             "SembleFindRelated",
         ],
-        "6de1ee86a131ca093c7143f54fffcba2fc14b32ff45fd6f5e0df1347058ad744",
+        "ff181389c07950fe787a363ea6832b0ac13d69fa08b2119cad19ab4a44e9183c",
     );
     assert_mode(
         &assets,
@@ -303,7 +303,7 @@ fn every_prompt_mode_loads_the_captured_tool_set() {
     );
     assert_eq!(
         schema_digest(&assets.mode(Mode::Agent).tools),
-        "282a1dff7957090d0a75eac4a46474ac7cffa1b0937bdf97354544e729bb15c2"
+        "b11e0a44e00b0f45afcda31c63d1ec1f857c1f908b7527c502bd2697b42bf067"
     );
     let task = assets
         .mode(Mode::Agent)
@@ -401,6 +401,37 @@ fn assert_mode(assets: &PromptAssets, mode: Mode, expected: &[&str], digest: &st
 
 fn schema_digest(tools: &[ToolDefinition]) -> String {
     hex::encode(Sha256::digest(serde_json::to_vec(tools).unwrap()))
+}
+
+#[test]
+fn meta_mode_adds_the_mcp_discovery_tool_without_duplicates() {
+    let assets = PromptAssets::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("prompt/cursor")
+            .as_path(),
+    )
+    .unwrap();
+    let compiler = PromptCompiler::new(assets);
+
+    let mut ask = compiler
+        .prompt_spec(Mode::Ask, &ModelSpec::new("model"), &[], false)
+        .unwrap();
+    assert!(!ask.tools.iter().any(|tool| tool.name == "GetMcpTools"));
+    compiler.ensure_mcp_discovery_tool(&mut ask);
+    assert_eq!(
+        ask.tools
+            .iter()
+            .filter(|tool| tool.name == "GetMcpTools")
+            .count(),
+        1
+    );
+
+    let mut agent = compiler
+        .prompt_spec(Mode::Agent, &ModelSpec::new("model"), &[], false)
+        .unwrap();
+    let before = agent.tools.len();
+    compiler.ensure_mcp_discovery_tool(&mut agent);
+    assert_eq!(agent.tools.len(), before);
 }
 
 #[test]

@@ -167,7 +167,7 @@ fn measure_sections(text: &str, measures: &mut [Measure; 8]) {
     collect_ranges(text, "agent_skills", SKILLS, &mut ranges);
     collect_ranges(text, "skill", SKILLS, &mut ranges);
     collect_ranges(text, "subagents", SUBAGENTS, &mut ranges);
-    collect_ranges(text, "mcp_meta_tools", MCP, &mut ranges);
+    collect_ranges(text, "dynamic_tools", MCP, &mut ranges);
     collect_ranges(text, "conversation_summary", SUMMARY, &mut ranges);
     ranges.sort_by_key(|range| range.0);
 
@@ -272,7 +272,7 @@ mod tests {
     const SKILLS: &str = "<agent_skills><available_skills><agent_skill fullPath=\"s\">desc</agent_skill></available_skills></agent_skills>";
     const SUBAGENTS: &str = "<subagents><subagent name=\"a\">d</subagent></subagents>";
     const MCP: &str =
-        "<mcp_meta_tools><mcp_meta_tool_server name=\"s\" identifier=\"i\"/></mcp_meta_tools>";
+        "<dynamic_tools><namespace name=\"i\" tools=\"a, b\" source=\"mcp\" /></dynamic_tools>";
     const ENV: &str = "<user_info>env</user_info>";
 
     #[test]
@@ -422,7 +422,7 @@ mod tests {
             "</rules>stray closing tag",
             "<rules>one",
             "<agent_skills",
-            "<mcp_meta_tools><mcp_tool>",
+            "<dynamic_tools><namespace name=\"i\" tools=\"a\"",
         ] {
             let snapshot = breakdown(
                 1_000,
